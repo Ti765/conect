@@ -1,0 +1,6 @@
+pandas
+sqlanydb
+beautifulsoup4
+lxml
+openpyxl
+ctypes
