@@ -1,6 +1,7 @@
 pandas
-sqlanydb
+pyodbc
 beautifulsoup4
 lxml
 openpyxl
-ctypes
+argparse
+logging
