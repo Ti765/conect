@@ -3,10 +3,14 @@
 """
 Classificador de Fornecedores
 ----------------------------
-Versão: 2025-07-01
+Versão: 2025-07-01  (Windows + pyodbc + ZIP)
 """
 
 from __future__ import annotations
+
+# ---------------------------------------------------------------------- #
+# Imports                                                                #
+# ---------------------------------------------------------------------- #
 import argparse
 import os
 import re
@@ -18,15 +22,29 @@ import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
+import uuid                              # ← para nome aleatório do zip
 
 import pandas as pd
-import sqlanydb
+import pyodbc                            # driver ODBC
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv           # lê .env
+
+load_dotenv()                            # carrega variáveis de ambiente do arquivo .env
+
+# ---------------------------------------------------------------------- #
+# 0. Configuração de logging                                             #
+# ---------------------------------------------------------------------- #
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler()],
+)
 
 # ---------------------------------------------------------------------- #
 # 1. Argumentos                                                          #
 # ---------------------------------------------------------------------- #
 def _parse_date(txt: str) -> str:
+    """Converte 'YYYY-MM-DD' ou 'DD/MM/AAAA' em 'YYYY-MM-DD'."""
     for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
         try:
             return datetime.strptime(txt, fmt).strftime("%Y-%m-%d")
@@ -49,7 +67,7 @@ def _args():
 args = _args()
 IN_DIR = Path(args.input_dir).expanduser().resolve()
 if not IN_DIR.exists():
-    sys.exit(f"❌ Pasta de entrada inexistente: {IN_DIR}")
+    sys.exit(f"Pasta de entrada inexistente: {IN_DIR}")
 
 OUT_ROOT = IN_DIR.parent / "ARQUIVOS CLASSIFICADOS"
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -58,26 +76,19 @@ EMPRESA = args.empresa
 DATA_INI, DATA_FIM = args.data_ini, args.data_fim
 
 # ---------------------------------------------------------------------- #
-# 2. Configuração SQL Anywhere                                           #
+# 2. Variáveis de ambiente SQL Anywhere                                  #
 # ---------------------------------------------------------------------- #
-# Inicializa logging cedo para debug
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-logging.info(">>> DEBUG SQLANY_BASE       = %r", os.getenv("SQLANY_BASE"))
-logging.info(">>> DEBUG LD_LIBRARY_PATH    = %r", os.getenv("LD_LIBRARY_PATH"))
-logging.info(">>> DEBUG SQLANY_API_DLL env = %r", os.getenv("SQLANY_API_DLL"))
+logging.info(">>> DEBUG SQLANY_BASE = %r", os.getenv("SQLANY_BASE"))
+logging.info(">>> DEBUG PATH        = %r", os.getenv("PATH"))
 
-HOST = os.getenv("SQLANY_HOST", "172.16.20.10")
-PORT = int(os.getenv("SQLANY_PORT", "2638"))
+HOST   = os.getenv("SQLANY_HOST", "172.16.20.10")
+PORT   = int(os.getenv("SQLANY_PORT", "2638"))
 DBNAME = os.getenv("SQLANY_DB", "contabil")
-UID = os.getenv("SQLANY_USER", "BI")
-PWD = os.getenv("SQLANY_PASSWORD", "4431610")
+UID    = os.getenv("SQLANY_USER", "BI")
+PWD    = os.getenv("SQLANY_PASSWORD", "4431610")
 
-MAX_PATH = 250
-TRUNC = 20
+MAX_PATH = 250          # limite Windows
+TRUNC    = 20
 
 TMP_XML = Path(tempfile.mkdtemp(prefix="xml_classif_"))
 
@@ -187,16 +198,15 @@ def filtro_cfop() -> pd.DataFrame:
 # 4. Conexão e consultas                                                 #
 # ---------------------------------------------------------------------- #
 def _connect():
-    """Conecta ao SQL Anywhere 16 via TCP/IP direto."""
+    """Conecta via ODBC (driver “SQL Anywhere 17”)."""
     conn_str = (
-        f"uid={UID};pwd={PWD};"
-        f"server=srvcontabil;"  # Nome do servidor conforme ODBC
-        f"dbn={DBNAME};"
-        f"host={HOST};port={PORT};"  # Use IP direto
-        f"charset=utf8"
+        "DRIVER={SQL Anywhere 17};"
+        f"SERVERNAME={os.getenv('SQLANY_SERVERNAME', 'srvcontabil')};"
+        f"HOST={HOST};PORT={PORT};"
+        f"DATABASE={DBNAME};UID={UID};PWD={PWD};"
     )
-    print(f"[DEBUG] String de conexão: {conn_str}")
-    return sqlanydb.connect(conn_str)
+    logging.debug("ODBC conn string: %s", conn_str)
+    return pyodbc.connect(conn_str, autocommit=True)
 
 
 def consulta_periodo(emp: int, ini: str, fim: str) -> pd.DataFrame:
@@ -287,7 +297,7 @@ class Classificador:
         }
         self.multi: list[dict] = []
 
-
+    # --- helpers ------------------------------------------------------- #
     @staticmethod
     def _build_map(df: pd.DataFrame) -> dict[str, list[dict]]:
         out: dict[str, list[dict]] = {}
@@ -300,7 +310,6 @@ class Classificador:
             })
         return out
 
-
     def _copy_in(self):
         for p in self.base.rglob("*"):
             if p.suffix.lower() == ".zip":
@@ -311,16 +320,13 @@ class Classificador:
         self.xmls = list({p.resolve() for p in self.temp.rglob("*.xml")})
         logging.info("Classificador: XMLs prontos: %d", len(self.xmls))
 
-
     def _ensure_dir(self, path: Path) -> Path:
         fixed = Path(*[seg.rstrip(" .") for seg in path.parts])
         fixed.mkdir(parents=True, exist_ok=True)
         return fixed
 
-
     def _safe_dst(self, dst: Path) -> Path:
         return dst if len(str(dst)) < MAX_PATH else dst.parent.parent / trunc(dst.parent.name) / dst.name
-
 
     def _move(self, src: Path, dst: Path):
         dst2 = self._safe_dst(dst)
@@ -331,7 +337,7 @@ class Classificador:
             shutil.copy2(src, dest_dir / dst2.name)
             src.unlink(missing_ok=True)
 
-
+    # --- run ----------------------------------------------------------- #
     def run(self):
         self._copy_in()
         dirF = self.out / "Fornecedores"
@@ -340,7 +346,6 @@ class Classificador:
         for d in (dirF, dirM, dirS):
             d.mkdir(parents=True, exist_ok=True)
         sem: dict[str, str] = {}
-
 
         for xml in self.xmls:
             cnpj, nome = extrair_emitente(xml)
@@ -364,7 +369,6 @@ class Classificador:
                     "Acumuladores": ", ".join(sorted({r["acu"] for r in recs})),
                 })
 
-
         # renomeia pastas de SemGrupo com info de fornecedor conhecido
         for cnpj, nome_xml in sem.items():
             old = dirS / cnpj
@@ -379,7 +383,6 @@ class Classificador:
                 old.rename(new)
             except Exception as e:
                 logging.warning("Rename falhou %s → %s: %s", old.name, new.name, e)
-
 
         if self.multi:
             pd.DataFrame(self.multi).drop_duplicates().to_excel(
@@ -411,8 +414,20 @@ def main():
         df_f = consulta_fornecedores(EMPRESA)
         Classificador(TMP_XML, OUT_ROOT, df_p, df_f).run()
 
+    # ------------------------------------------------------------------ #
+    # 7. Gera ZIP com o resultado                                        #
+    # ------------------------------------------------------------------ #
+    zip_name = f"classificados_{uuid.uuid4().hex[:8]}"
+    zip_path = shutil.make_archive(
+        base_name=str(OUT_ROOT.parent / zip_name),
+        format="zip",
+        root_dir=OUT_ROOT
+    )
+    # avisa o caller (route.ts) onde está o arquivo
+    print(f"ZIP_OK:{zip_path}", flush=True)
+
     shutil.rmtree(TMP_XML, ignore_errors=True)
-    print(f"✅ Concluído. Resultados em: {OUT_ROOT}")
+    print(f"Concluido. Resultados em: {OUT_ROOT}")
 
 
 if __name__ == "__main__":
