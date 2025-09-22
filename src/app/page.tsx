@@ -1,4 +1,3 @@
-
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowRight, BarChart3, FileText, AlertTriangle } from "lucide-react";
@@ -24,22 +23,25 @@ export default function DashboardPage() {
             <p className="text-lg text-muted-foreground mb-6">
               Sua plataforma inteligente para automação e análise fiscal. Simplifique processos, ganhe insights e tome decisões mais assertivas.
             </p>
-            <Link href="/analyze-discrepancies">
-              <Button size="lg" className="bg-gradient-to-r from-primary via-blue-600 to-purple-600 hover:opacity-90 text-primary-foreground">
-                Analisar Divergências com IA
-                <ArrowRight className="ml-2 h-5 w-5" />
-              </Button>
-            </Link>
+            {/* Botão removido: Analisar Divergências com IA */}
           </div>
           <div>
+            {/* Imagem dinâmica para tema claro/escuro */}
             <Image
-              src="https://placehold.co/600x400.png"
-              alt="Fiscal Analytics Illustration"
+              src="/Logo-Glip-Sem%20Assinatura%20da%20Marca_Colorido.png"
+              alt="Logo Glip Colorido"
               width={600}
               height={400}
-              className="rounded-lg shadow-md"
-              data-ai-hint="data analytics"
-              priority // Added priority to prevent lazy loading for LCP image
+              className="block dark:hidden"
+              priority
+            />
+            <Image
+              src="/3.%20Logo-Glip-Completo_Branco_Todo%20Branco.png"
+              alt="Logo Glip Branco"
+              width={600}
+              height={400}
+              className="hidden dark:block"
+              priority
             />
           </div>
         </div>

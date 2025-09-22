@@ -5,3 +5,4 @@ lxml
 openpyxl
 argparse
 logging
+dotenv

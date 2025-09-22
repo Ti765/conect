@@ -19,18 +19,8 @@ export const navItems = [
     icon: Truck,
     label: "CT-e",
   },
-  {
-    title: "Separar XML por Tipo",
-    href: "/separate-xml",
-    icon: FileText,
-    label: "XML",
-  },
-  {
-    title: "Análise de Divergências Fiscais",
-    href: "/analyze-discrepancies",
-    icon: Bot,
-    label: "AI Analyze",
-  },
+  // Removido: Separar XML por Tipo
+  // Removido: Análise de Divergências Fiscais
   {
     title: "Corrigir Chave de Acesso",
     href: "/correct-access-key",
