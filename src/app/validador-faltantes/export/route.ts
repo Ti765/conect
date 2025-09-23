@@ -7,9 +7,9 @@ import { existsSync } from "fs";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** GET de saúde: acesse /api/validador-faltantes/export e confira 200 + JSON */
+/** GET de saúde: /validador-faltantes/export */
 export async function GET() {
-  return NextResponse.json({ ok: true, route: "/api/validador-faltantes/export" });
+  return NextResponse.json({ ok: true, route: "/validador-faltantes/export" });
 }
 
 function pickPython(): { cmd: string; args: string[] } {
@@ -25,7 +25,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "JSON inválido." }, { status: 400 });
     }
 
-    const { codi_emp, data_inicio, data_fim } = data;
+    const { codi_emp, data_inicio, data_fim } = data as {
+      codi_emp?: number;
+      data_inicio?: string;
+      data_fim?: string;
+    };
     if (!codi_emp || !data_inicio || !data_fim) {
       return NextResponse.json(
         { ok: false, error: "Parâmetros obrigatórios: codi_emp, data_inicio, data_fim." },
@@ -39,6 +43,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: `Script não encontrado em ${scriptPath}` }, { status: 500 });
     }
 
+    // Prefixa PATH com Bin64/Bin32 do SQL Anywhere (Windows)
     const base = process.env.SQLANY_BASE || "";
     const bin64 = base ? join(base, "Bin64") : "";
     const bin32 = base ? join(base, "Bin32") : "";
@@ -71,25 +76,25 @@ export async function POST(req: NextRequest) {
     let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (d) => {
+    child.stdout.on("data", (d: Buffer) => {
       const s = d.toString();
       stdout += s;
-      s.split(/\r?\n/).forEach((line) => line && console.log("[python]", line));
+      s.split(/\r?\n/).forEach((line: string) => line && console.log("[python]", line));
     });
 
-    child.stderr.on("data", (d) => {
+    child.stderr.on("data", (d: Buffer) => {
       const s = d.toString();
       stderr += s;
-      s.split(/\r?\n/).forEach((line) => line && console.error("[python:err]", line));
+      s.split(/\r?\n/).forEach((line: string) => line && console.error("[python:err]", line));
     });
 
     const exitCode: number = await new Promise((res) => child.on("close", res));
-
     if (exitCode !== 0) {
       const msg = stderr || stdout || "Falha desconhecida no processamento.";
       return NextResponse.json({ ok: false, error: msg.slice(0, 2000) }, { status: 500 });
     }
 
+    // O app.py imprime: XLSX_OK:<caminho>
     const match = stdout.match(/XLSX_OK:(.+\.xlsx)/i);
     if (!match) {
       console.error("[validator] Saída inesperada do Python; não achei XLSX_OK.");
@@ -98,12 +103,14 @@ export async function POST(req: NextRequest) {
 
     const filePath = match[1].trim();
     const buf = await readFile(filePath);
-    const filename = filePath.split(/[/\\]/).pop() || "validador_faltantes.xlsx";
 
-    return new NextResponse(buf, {
+    // ✅ Convertemos para Uint8Array (BodyInit aceita ArrayBufferView)
+    const u8 = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+
+    return new NextResponse(u8, {
       headers: {
         "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Content-Disposition": `attachment; filename="validador_faltantes.xlsx"`,
       },
     });
   } catch (err: any) {

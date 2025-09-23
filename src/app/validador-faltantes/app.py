@@ -16,7 +16,7 @@ import pyodbc
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, model_validator
 
 # ==============================================================================
 # Setup (.env + LOG)
@@ -95,8 +95,8 @@ COL_COD_CLI      = _get("COL_COD_CLI", "CODI_CLI")
 COL_CNPJ_CLI     = _get("COL_CNPJ_CLI", "CGCE_CLI")
 
 # EMPRESA (para descobrir CNPJ por CODI_EMP)
-TB_EMPRESA       = _get("TB_EMPRESA", "EFEMPRESA")
-COL_CNPJ_EMP     = _get("COL_CNPJ_EMP", "")
+TB_EMPRESA       = _get("TB_EMPRESA", "EFEMPRESA")  # se não existir no seu Domínio, deixe e use descoberta
+COL_CNPJ_EMP     = _get("COL_CNPJ_EMP", "")         # informe aqui se souber (ex.: CGCE_EMP)
 
 # Modelos
 MODELO_DOM_NFE   = int(_get("MODELO_DOM_NFE", "36"))  # NFe (55)
@@ -112,26 +112,69 @@ SIEG_TIMEOUT     = float(_get("SIEG_TIMEOUT", "60"))
 # Conexão ODBC
 # ==============================================================================
 def odbc_connect() -> pyodbc.Connection:
-    parts = []
-    # monta DRIVER={NOME}
-    driver_part = "DRIVER={" + (SQLANY_DRIVER or "SQL Anywhere 17") + "}"
-    parts.append(driver_part)
+    """
+    Tenta 3 estratégias de conexão (em ordem):
+    1) ENG/DBN + LINKS=TCPIP(HOST;PORT)      -> mais explícita, costuma resolver -100
+    2) HOST=host:port + DBN=dbname           -> usa Host:Port direto
+    3) SERVER=ServerName + DBN=dbname        -> depende do discovery/broadcast
+    """
+    driver = "{" + (SQLANY_DRIVER or "SQL Anywhere 17") + "}"
+
+    attempts = []
+
+    # 1) ENG/DBN + LINKS TCPIP
+    attempts.append(
+        ";".join([
+            f"DRIVER={driver}",
+            f"ENG={SQLANY_SERVERNAME}" if SQLANY_SERVERNAME else "",
+            f"DBN={SQLANY_DB}",
+            f"UID={SQLANY_USER}",
+            f"PWD={SQLANY_PASSWORD}",
+            f"LINKS=TCPIP(HOST={SQLANY_HOST};PORT={SQLANY_PORT})",
+            "AutoStop=No",
+            "INTLTOUTF8=Yes",
+        ])
+    )
+
+    # 2) HOST:PORT + DBN
+    host_port = f"{SQLANY_HOST}:{SQLANY_PORT}" if SQLANY_HOST and SQLANY_PORT else SQLANY_HOST
+    attempts.append(
+        ";".join([
+            f"DRIVER={driver}",
+            f"Host={host_port}" if host_port else "",
+            f"DBN={SQLANY_DB}",
+            f"UID={SQLANY_USER}",
+            f"PWD={SQLANY_PASSWORD}",
+            "AutoStop=No",
+            "INTLTOUTF8=Yes",
+        ])
+    )
+
+    # 3) SERVER=ServerName + DBN (sem HOST)
     if SQLANY_SERVERNAME:
-        parts.append(f"SERVERNAME={SQLANY_SERVERNAME}")
-    if SQLANY_HOST:
-        parts.append(f"HOST={SQLANY_HOST}")
-    if SQLANY_PORT:
-        parts.append(f"PORT={SQLANY_PORT}")
-    parts.append(f"DATABASE={SQLANY_DB}")
-    parts.append(f"UID={SQLANY_USER}")
-    parts.append(f"PWD={SQLANY_PASSWORD}")
-    conn_str = ";".join(parts) + ";"
-    log.debug("ODBC connection string: %s", conn_str)
-    try:
-        return pyodbc.connect(conn_str, autocommit=True)
-    except pyodbc.Error as e:
-        log.exception("Falha ODBC")
-        raise HTTPException(status_code=500, detail=f"Erro ODBC: {e}")
+        attempts.append(
+            ";".join([
+                f"DRIVER={driver}",
+                f"ServerName={SQLANY_SERVERNAME}",
+                f"DBN={SQLANY_DB}",
+                f"UID={SQLANY_USER}",
+                f"PWD={SQLANY_PASSWORD}",
+                "AutoStop=No",
+                "INTLTOUTF8=Yes",
+            ])
+        )
+
+    last_err = None
+    for i, raw in enumerate(attempts, 1):
+        conn_str = ";".join([p for p in raw.split(";") if p]) + ";"
+        log.debug("ODBC try %s: %s", i, conn_str)
+        try:
+            return pyodbc.connect(conn_str, autocommit=True)
+        except pyodbc.Error as e:
+            last_err = e
+            log.warning("ODBC tentativa %s falhou: %s", i, e)
+
+    raise HTTPException(status_code=500, detail=f"Erro ODBC após tentativas: {last_err}")
 
 # ==============================================================================
 # Modelos / Enums
@@ -149,40 +192,95 @@ class MinimalPayload(BaseModel):
     data_inicio: date
     data_fim: date
 
-    @validator("data_fim")
-    def _range_ok(cls, v, values):
-        di = values.get("data_inicio")
-        if di and v < di:
+    @model_validator(mode="after")
+    def _check_dates(self):
+        if self.data_fim < self.data_inicio:
             raise ValueError("data_fim anterior a data_inicio.")
-        if di and (v - di).days > 92:
+        if (self.data_fim - self.data_inicio).days > 92:
             raise ValueError("Período máximo de 3 meses (92 dias).")
-        return v
+        return self
 
 # ==============================================================================
-# Util: descobrir CNPJ da empresa
+# Util: descobrir CNPJ da empresa (TOP 1 + prioridade GEEMPRE/GEEMPRE_VIGENCIA)
 # ==============================================================================
-CANDIDATE_CNPJ_COLS = ["CGC_CIA", "CGC", "CGC_EMP", "CNPJ", "CGCE_EMP", "CNPJ_EMP"]
+CANDIDATE_CNPJ_COLS = ["CGC_CIA", "CGC", "CGC_EMP", "CNPJ", "CGCE_EMP", "CNPJ_EMP", "CGCE_EMP"]
+PRIORITY_TABLES = [
+    ("GEEMPRE", "CGCE_EMP"),
+    ("GEEMPRE_VIGENCIA", "CGCE_EMP"),
+    ("GEEMPRE", "CNPJ"),
+    ("GEEMPRE_VIGENCIA", "CNPJ"),
+]
 
 def get_cnpj_empresa(emp: int) -> str:
     with odbc_connect() as conn:
         cur = conn.cursor()
-        cols_try = [COL_CNPJ_EMP] if COL_CNPJ_EMP else CANDIDATE_CNPJ_COLS
-        last_err = None
-        for col in cols_try:
+
+        # 0) Se .env tiver TB_EMPRESA/COL_CNPJ_EMP, tenta direto (melhor performance)
+        if TB_EMPRESA and COL_CNPJ_EMP:
             try:
-                sql = f"SELECT {col} FROM {DOM_SCHEMA}.{TB_EMPRESA} WHERE CODI_EMP = ?"
-                log.debug("SQL CNPJ empresa: %s", sql)
+                sql = f"SELECT TOP 1 {COL_CNPJ_EMP} FROM {DOM_SCHEMA}.{TB_EMPRESA} WHERE CODI_EMP = ?"
+                log.debug("SQL CNPJ (.env): %s", sql)
                 cur.execute(sql, (emp,))
                 row = cur.fetchone()
                 if row and row[0]:
                     cnpj = re.sub(r"\D", "", str(row[0]))
                     if len(cnpj) == 14:
-                        log.info("CNPJ empresa %s obtido por coluna %s: %s", emp, col, cnpj)
+                        log.info("CNPJ %s via %s.%s: %s", emp, TB_EMPRESA, COL_CNPJ_EMP, cnpj)
+                        return cnpj
+            except Exception as e:
+                log.warning("Falha ao consultar %s.%s: %s", TB_EMPRESA, COL_CNPJ_EMP, e)
+
+        # 1) Prioriza tabelas conhecidas do Domínio
+        for tbl, col in PRIORITY_TABLES:
+            try:
+                sql = f"SELECT TOP 1 {col} FROM {DOM_SCHEMA}.{tbl} WHERE CODI_EMP = ?"
+                log.debug("SQL CNPJ (prior): %s", sql)
+                cur.execute(sql, (emp,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    cnpj = re.sub(r"\D", "", str(row[0]))
+                    if len(cnpj) == 14:
+                        log.info("CNPJ %s via %s.%s: %s", emp, tbl, col, cnpj)
+                        return cnpj
+            except Exception:
+                continue
+
+        # 2) Catálogo: encontra tabelas do schema com CODI_EMP + alguma coluna candidata de CNPJ
+        catalog_sql = f"""
+        SELECT u.user_name   AS owner_name,
+               t.table_name  AS table_name,
+               c_cnpj.column_name AS cnpj_col
+          FROM sys.systab t
+          JOIN sys.sysuser u        ON u.user_id = t.creator
+          JOIN sys.syscolumn c_emp  ON c_emp.table_id = t.table_id AND UPPER(c_emp.column_name) = 'CODI_EMP'
+          JOIN sys.syscolumn c_cnpj ON c_cnpj.table_id = t.table_id
+         WHERE UPPER(u.user_name) = UPPER(?)
+           AND UPPER(c_cnpj.column_name) IN ({",".join("'" + c + "'" for c in CANDIDATE_CNPJ_COLS)})
+        """
+        cur.execute(catalog_sql, (DOM_SCHEMA,))
+        candidates = cur.fetchall()
+
+        last_err = None
+        for owner_name, table_name, cnpj_col in candidates:
+            try:
+                sql = f"SELECT TOP 1 {cnpj_col} FROM {owner_name}.{table_name} WHERE CODI_EMP = ?"
+                log.debug("SQL CNPJ (catalog): %s", sql)
+                cur.execute(sql, (emp,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    cnpj = re.sub(r"\D", "", str(row[0]))
+                    if len(cnpj) == 14:
+                        log.info("CNPJ %s via %s.%s(%s): %s", emp, owner_name, table_name, cnpj_col, cnpj)
                         return cnpj
             except Exception as e:
                 last_err = e
                 continue
-        msg = f"Não foi possível obter o CNPJ para CODI_EMP={emp}. Ajuste TB_EMPRESA/COL_CNPJ_EMP no .env"
+
+        msg = (
+            f"Não consegui obter CNPJ para CODI_EMP={emp}. "
+            f"Tente informar TB_EMPRESA e COL_CNPJ_EMP corretos no .env "
+            f"ou valide quais tabelas do schema {DOM_SCHEMA} possuem CODI_EMP + CNPJ."
+        )
         if last_err:
             msg += f" (último erro: {last_err})"
         log.error(msg)
@@ -399,6 +497,7 @@ def _filter_sieg_por_direcao(df: pd.DataFrame, cnpj: str, tipo: TipoDocumento, d
     if df.empty:
         return df
     if tipo == TipoDocumento.CTE:
+        # CT-e: somente tomador (recebidos)
         if direcao == Direcao.SAIDA:
             return pd.DataFrame(columns=df.columns)
         mask = False
@@ -408,6 +507,7 @@ def _filter_sieg_por_direcao(df: pd.DataFrame, cnpj: str, tipo: TipoDocumento, d
             mask = mask | (df["CNPJ_DEST_SIEG"] == cnpj)
         return df[mask] if isinstance(mask, pd.Series) else df
 
+    # NFe
     if direcao == Direcao.ENTRADA:
         if "CNPJ_DEST_SIEG" in df.columns:
             return df[df["CNPJ_DEST_SIEG"] == cnpj]
