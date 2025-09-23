@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 from datetime import date, datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import httpx
@@ -21,7 +22,12 @@ from pydantic import BaseModel, Field, model_validator
 # ==============================================================================
 # Setup (.env + LOG)
 # ==============================================================================
-load_dotenv()
+APP_DIR = Path(__file__).parent
+
+# carrega .env da raiz do projeto e o .env local desta pasta
+load_dotenv()  # raiz do projeto (se existir)
+load_dotenv(APP_DIR / ".env", override=False)  # .env local do app
+
 LOG_LEVEL = os.getenv("FISCALFLOW_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -57,66 +63,77 @@ def _get(env: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(env)
     return v if (v is not None and str(v).strip() != "") else default
 
-# ODBC
+# ODBC – somente o que é realmente variável por ambiente
 SQLANY_DRIVER     = _get("SQLANY_DRIVER", "SQL Anywhere 17")
-SQLANY_SERVERNAME = _get("SQLANY_SERVERNAME", "")  # opcional
+SQLANY_SERVERNAME = _get("SQLANY_SERVERNAME", "")
 SQLANY_HOST       = _get("SQLANY_HOST", "127.0.0.1")
 SQLANY_PORT       = _get("SQLANY_PORT", "2638")
-SQLANY_DB         = _get("SQLANY_DB") or _get("SQLANY_DBNAME", "contabil")
-SQLANY_USER       = _get("SQLANY_USER") or _get("SQLANY_UID", "dba")
-SQLANY_PASSWORD   = _get("SQLANY_PASSWORD") or _get("SQLANY_PWD", "sql")
-
-# Domínio – schema / TABELAS / COLUNAS
-DOM_SCHEMA       = _get("DOM_SCHEMA", "bethadba")
-
-# ENTRADAS
-TB_ENTRADAS      = _get("TB_ENTRADAS", "EFENTRADAS")
-TB_FORNECEDOR    = _get("TB_FORNECEDOR", "EFFORNECE")
-COL_CHAVE_ENT    = _get("COL_CHAVE_ENT", "CHAVE_NFE")
-COL_STATUS_ENT   = _get("COL_STATUS_ENT", "SITU_NFE")
-COL_NUMERO_ENT   = _get("COL_NUMERO_ENT", "NFIS_ENT")
-COL_SERIE_ENT    = _get("COL_SERIE_ENT", "SERI_ENT")
-COL_DEMI_ENT     = _get("COL_DEMI_ENT", "DEMI_ENT")
-COL_DENT_ENT     = _get("COL_DENT_ENT", "DDOC_ENT")   # data de entrada
-COL_VALOR_ENT    = _get("COL_VALOR_ENT", "VLRT_ENT")
-COL_COD_FOR      = _get("COL_COD_FOR", "CODI_FOR")
-COL_CNPJ_FOR     = _get("COL_CNPJ_FOR", "CGCE_FOR")
-
-# SAÍDAS
-TB_SAIDAS        = _get("TB_SAIDAS", "EFSAIDAS")
-TB_CLIENTES      = _get("TB_CLIENTES", "EFCLIENTE")
-COL_CHAVE_SAI    = _get("COL_CHAVE_SAI", "CHAVE_NFE")
-COL_STATUS_SAI   = _get("COL_STATUS_SAI", "SITU_NFE")
-COL_NUMERO_SAI   = _get("COL_NUMERO_SAI", "NFIS_SAI")
-COL_SERIE_SAI    = _get("COL_SERIE_SAI", "SERI_SAI")
-COL_DEMI_SAI     = _get("COL_DEMI_SAI", "DEMI_SAI")   # data de emissão
-COL_VALOR_SAI    = _get("COL_VALOR_SAI", "VLRT_SAI")
-COL_COD_CLI      = _get("COL_COD_CLI", "CODI_CLI")
-COL_CNPJ_CLI     = _get("COL_CNPJ_CLI", "CGCE_CLI")
-
-# EMPRESA (para descobrir CNPJ por CODI_EMP)
-TB_EMPRESA       = _get("TB_EMPRESA", "EFEMPRESA")  # se não existir no seu Domínio, deixe e use descoberta
-COL_CNPJ_EMP     = _get("COL_CNPJ_EMP", "")         # informe aqui se souber (ex.: CGCE_EMP)
-
-# Modelos
-MODELO_DOM_NFE   = int(_get("MODELO_DOM_NFE", "36"))  # NFe (55)
-MODELO_DOM_CTE   = int(_get("MODELO_DOM_CTE", "56"))  # CTe (57)
+SQLANY_DB         = _get("SQLANY_DB", "contabil")
+SQLANY_USER       = _get("SQLANY_USER", "dba")
+SQLANY_PASSWORD   = _get("SQLANY_PASSWORD", "sql")
 
 # SIEG
-SIEG_API_KEY     = _get("SIEG_API_KEY", "")
-SIEG_BASE_URL    = _get("SIEG_BASE_URL", "https://api.sieg.com")
-SIEG_REPORT_TYPE = int(_get("SIEG_REPORT_TYPE", "2"))
-SIEG_TIMEOUT     = float(_get("SIEG_TIMEOUT", "60"))
+SIEG_API_KEY  = _get("SIEG_API_KEY", "")
+SIEG_BASE_URL = _get("SIEG_BASE_URL", "https://api.sieg.com")
+SIEG_TIMEOUT  = float(_get("SIEG_TIMEOUT", "60"))
+
+# ==============================================================================
+# Domínio – constantes FIXAS (você pediu para não depender do .env)
+# ==============================================================================
+DOM_SCHEMA = "bethadba"
+
+# Entradas
+TB_ENTRADAS      = "EFENTRADAS"
+TB_FORNECEDOR    = "EFFORNECE"
+COL_CHAVE_ENT    = "CHAVE_NFE"
+COL_STATUS_ENT   = "SITU_NFE"
+COL_NUMERO_ENT   = "NFIS_ENT"
+COL_SERIE_ENT    = "SERI_ENT"
+COL_DEMI_ENT     = "DEMI_ENT"   # emissão
+COL_DENT_ENT     = "DDOC_ENT"   # entrada
+COL_VALOR_ENT    = "VLRT_ENT"
+COL_COD_FOR      = "CODI_FOR"
+COL_CNPJ_FOR     = "CGCE_FOR"
+
+# Saídas (NFe)
+TB_SAIDAS        = "EFSAIDAS"
+TB_CLIENTES      = "EFCLIENTE"
+COL_CHAVE_SAI    = "CHAVE_NFE"
+COL_STATUS_SAI   = "SITU_NFE"
+COL_NUMERO_SAI   = "NFIS_SAI"
+COL_SERIE_SAI    = "SERI_SAI"
+COL_DEMI_SAI     = "DEMI_SAI"   # emissão
+COL_VALOR_SAI    = "VLRT_SAI"
+COL_COD_CLI      = "CODI_CLI"
+COL_CNPJ_CLI     = "CGCE_CLI"
+
+# Mapeamento de modelo no Domínio (fixo, conforme você usa)
+# NFe (modelo 55) -> CODI_ESP = 36 | CT-e (57) -> CODI_ESP = 56
+MODELO_DOM_NFE = 36
+MODELO_DOM_CTE = 56
+
+# Tabelas prioritárias para achar CNPJ por CODI_EMP
+PRIORITY_TABLES: List[Tuple[str, str]] = [
+    ("GEEMPRE", "CGCE_EMP"),
+    ("GEEMPRE_VIGENCIA", "CGCE_EMP"),
+    ("GEEMPRE", "CNPJ"),
+    ("EFEMPRESA", "CGC_CIA"),
+]
+# Colunas candidatas para descoberta genérica (UPPER)
+CANDIDATE_CNPJ_COLS = [
+    "CGC_CIA", "CGC", "CGC_EMP", "CNPJ", "CGCE_EMP", "CNPJ_EMP"
+]
 
 # ==============================================================================
 # Conexão ODBC
 # ==============================================================================
 def odbc_connect() -> pyodbc.Connection:
     """
-    Tenta 3 estratégias de conexão (em ordem):
-    1) ENG/DBN + LINKS=TCPIP(HOST;PORT)      -> mais explícita, costuma resolver -100
-    2) HOST=host:port + DBN=dbname           -> usa Host:Port direto
-    3) SERVER=ServerName + DBN=dbname        -> depende do discovery/broadcast
+    Tenta 3 estratégias (ordem importa):
+      1) ENG/DBN + LINKS=TCPIP(HOST;PORT)
+      2) Host=host:port + DBN=dbname
+      3) ServerName=server + DBN=dbname
+    (boas práticas de string de conexão do SQL Anywhere). :contentReference[oaicite:2]{index=2}
     """
     driver = "{" + (SQLANY_DRIVER or "SQL Anywhere 17") + "}"
 
@@ -150,7 +167,7 @@ def odbc_connect() -> pyodbc.Connection:
         ])
     )
 
-    # 3) SERVER=ServerName + DBN (sem HOST)
+    # 3) ServerName + DBN
     if SQLANY_SERVERNAME:
         attempts.append(
             ";".join([
@@ -199,38 +216,16 @@ class MinimalPayload(BaseModel):
         if (self.data_fim - self.data_inicio).days > 92:
             raise ValueError("Período máximo de 3 meses (92 dias).")
         return self
+# Pydantic v2 – ver docs de model_validator. :contentReference[oaicite:3]{index=3}
 
 # ==============================================================================
-# Util: descobrir CNPJ da empresa (TOP 1 + prioridade GEEMPRE/GEEMPRE_VIGENCIA)
+# Util: descobrir CNPJ da empresa (TOP 1) – evita FETCH (erro que você viu)
 # ==============================================================================
-CANDIDATE_CNPJ_COLS = ["CGC_CIA", "CGC", "CGC_EMP", "CNPJ", "CGCE_EMP", "CNPJ_EMP", "CGCE_EMP"]
-PRIORITY_TABLES = [
-    ("GEEMPRE", "CGCE_EMP"),
-    ("GEEMPRE_VIGENCIA", "CGCE_EMP"),
-    ("GEEMPRE", "CNPJ"),
-    ("GEEMPRE_VIGENCIA", "CNPJ"),
-]
-
 def get_cnpj_empresa(emp: int) -> str:
     with odbc_connect() as conn:
         cur = conn.cursor()
 
-        # 0) Se .env tiver TB_EMPRESA/COL_CNPJ_EMP, tenta direto (melhor performance)
-        if TB_EMPRESA and COL_CNPJ_EMP:
-            try:
-                sql = f"SELECT TOP 1 {COL_CNPJ_EMP} FROM {DOM_SCHEMA}.{TB_EMPRESA} WHERE CODI_EMP = ?"
-                log.debug("SQL CNPJ (.env): %s", sql)
-                cur.execute(sql, (emp,))
-                row = cur.fetchone()
-                if row and row[0]:
-                    cnpj = re.sub(r"\D", "", str(row[0]))
-                    if len(cnpj) == 14:
-                        log.info("CNPJ %s via %s.%s: %s", emp, TB_EMPRESA, COL_CNPJ_EMP, cnpj)
-                        return cnpj
-            except Exception as e:
-                log.warning("Falha ao consultar %s.%s: %s", TB_EMPRESA, COL_CNPJ_EMP, e)
-
-        # 1) Prioriza tabelas conhecidas do Domínio
+        # 1) Prioriza tabelas/colunas conhecidas
         for tbl, col in PRIORITY_TABLES:
             try:
                 sql = f"SELECT TOP 1 {col} FROM {DOM_SCHEMA}.{tbl} WHERE CODI_EMP = ?"
@@ -245,8 +240,8 @@ def get_cnpj_empresa(emp: int) -> str:
             except Exception:
                 continue
 
-        # 2) Catálogo: encontra tabelas do schema com CODI_EMP + alguma coluna candidata de CNPJ
-        catalog_sql = f"""
+        # 2) Catálogo genérico: encontra tabelas com CODI_EMP + coluna candidata de CNPJ
+        catalog_sql = """
         SELECT u.user_name   AS owner_name,
                t.table_name  AS table_name,
                c_cnpj.column_name AS cnpj_col
@@ -255,12 +250,13 @@ def get_cnpj_empresa(emp: int) -> str:
           JOIN sys.syscolumn c_emp  ON c_emp.table_id = t.table_id AND UPPER(c_emp.column_name) = 'CODI_EMP'
           JOIN sys.syscolumn c_cnpj ON c_cnpj.table_id = t.table_id
          WHERE UPPER(u.user_name) = UPPER(?)
-           AND UPPER(c_cnpj.column_name) IN ({",".join("'" + c + "'" for c in CANDIDATE_CNPJ_COLS)})
-        """
+           AND UPPER(c_cnpj.column_name) IN ({})
+        """.format(",".join("'" + c + "'" for c in CANDIDATE_CNPJ_COLS))
+        # Catálogo do SQL Anywhere: systab, sysuser, syscolumn. :contentReference[oaicite:4]{index=4}
+
         cur.execute(catalog_sql, (DOM_SCHEMA,))
         candidates = cur.fetchall()
 
-        last_err = None
         for owner_name, table_name, cnpj_col in candidates:
             try:
                 sql = f"SELECT TOP 1 {cnpj_col} FROM {owner_name}.{table_name} WHERE CODI_EMP = ?"
@@ -272,17 +268,11 @@ def get_cnpj_empresa(emp: int) -> str:
                     if len(cnpj) == 14:
                         log.info("CNPJ %s via %s.%s(%s): %s", emp, owner_name, table_name, cnpj_col, cnpj)
                         return cnpj
-            except Exception as e:
-                last_err = e
+            except Exception:
                 continue
 
-        msg = (
-            f"Não consegui obter CNPJ para CODI_EMP={emp}. "
-            f"Tente informar TB_EMPRESA e COL_CNPJ_EMP corretos no .env "
-            f"ou valide quais tabelas do schema {DOM_SCHEMA} possuem CODI_EMP + CNPJ."
-        )
-        if last_err:
-            msg += f" (último erro: {last_err})"
+        msg = (f"Não consegui obter CNPJ para CODI_EMP={emp}. "
+               f"Valide se há CGCE_EMP/CGC/CNPJ em {DOM_SCHEMA}.GEEMPRE/GEEMPRE_VIGENCIA ou em outra tabela.")
         log.error(msg)
         raise HTTPException(500, msg)
 
@@ -320,7 +310,9 @@ def query_dom_entradas(emp: int, tipo: TipoDocumento, di: date, df: date) -> pd.
         df = pd.read_sql(sql, conn, params=(emp, modelo, di.isoformat(), df.isoformat()))
 
     if "CNPJ_EMITENTE" in df.columns:
-        df["CNPJ_EMITENTE"] = df["CNPJ_EMITENTE"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(14)
+        df["CNPJ_EMITENTE"] = (
+            df["CNPJ_EMITENTE"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(14)
+        )
     if "CHAVE" in df.columns:
         df["CHAVE"] = df["CHAVE"].astype(str).str.replace(r"\D", "", regex=True)
 
@@ -368,7 +360,9 @@ def query_dom_saidas(emp: int, tipo: TipoDocumento, di: date, df: date) -> pd.Da
         df = pd.read_sql(sql, conn, params=(emp, modelo, di.isoformat(), df.isoformat()))
 
     if "CNPJ_DESTINATARIO" in df.columns:
-        df["CNPJ_DESTINATARIO"] = df["CNPJ_DESTINATARIO"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(14)
+        df["CNPJ_DESTINATARIO"] = (
+            df["CNPJ_DESTINATARIO"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(14)
+        )
     if "CHAVE" in df.columns:
         df["CHAVE"] = df["CHAVE"].astype(str).str.replace(r"\D", "", regex=True)
 
@@ -380,13 +374,18 @@ def query_dom_saidas(emp: int, tipo: TipoDocumento, di: date, df: date) -> pd.Da
     return df
 
 # ==============================================================================
-# SIEG – /api/relatorio/xml
+# SIEG – /api/relatorio/xml (retry + escolha automática do report)
 # ==============================================================================
+def _sieg_report_type_for(tipo: TipoDocumento) -> int:
+    # 2 = Relatório Básico (NFe) | 4 = Relatório CTe (CT-e)
+    return 2 if tipo == TipoDocumento.NFE else 4
+
 class SiegReportParams(BaseModel):
     cnpj: str
     xml_type: int    # 1=NFe, 2=CTe
     year: int
     month: int
+    report_type: int
 
 def _month_range(di: date, df: date) -> List[Tuple[int, int]]:
     y, m = di.year, di.month
@@ -417,36 +416,64 @@ def _detect_cols(cols: List[str]) -> Dict[str, Optional[str]]:
         "cnpj_rem":   find(["remet", "remetente", "cnpj rem", "cnpj_rem"]),
     }
 
-async def _fetch_sieg_month(p: SiegReportParams) -> pd.DataFrame:
+async def _post_sieg(body: dict) -> httpx.Response:
     url = f"{SIEG_BASE_URL}/api/relatorio/xml"
     headers = {
         "Content-Type": "application/json",
+        "Accept": "application/json",
+        # já vi implementações aceitarem qualquer um destes:
         "x-api-key": SIEG_API_KEY,
         "api-key": SIEG_API_KEY,
         "ApiKey": SIEG_API_KEY,
         "Authorization": f"ApiKey {SIEG_API_KEY}",
     }
+    async with httpx.AsyncClient(timeout=SIEG_TIMEOUT) as client:
+        return await client.post(url, headers=headers, json=body)
+
+async def _fetch_sieg_month(p: SiegReportParams) -> pd.DataFrame:
+    """
+    Chama /api/relatorio/xml. Em caso de 500/429/502 tenta até 3 vezes (backoff).
+    Para CT-e tenta automaticamente o report_type 4 (CTe). Para NF-e usa 2.
+    """
     body = {
         "Cnpj": p.cnpj,
-        "TypeXmlDownloadReport": SIEG_REPORT_TYPE,
+        "TypeXmlDownloadReport": p.report_type,
         "XmlType": p.xml_type,   # 1=NFe, 2=CTe
         "Month": p.month,
         "Year": p.year,
     }
-    async with httpx.AsyncClient(timeout=SIEG_TIMEOUT) as client:
-        resp = await client.post(url, headers=headers, json=body)
-        if resp.status_code != 200:
-            raise HTTPException(502, f"SIEG HTTP {resp.status_code}: {resp.text[:200]}")
-        try:
-            if "application/json" in (resp.headers.get("content-type") or ""):
-                data = resp.json()
-                b64 = data.get("ArquivoBase64") or data.get("Base64") or data.get("File") or data.get("Data")
-            else:
-                b64 = resp.text.strip().strip('"')
-        except Exception:
-            b64 = resp.text.strip().strip('"')
 
-    xlsx_bytes = base64.b64decode(b64)
+    exceptions: List[str] = []
+    for attempt in (1, 2, 3):
+        resp = await _post_sieg(body)
+        if resp.status_code == 200:
+            break
+        # fallback: se CT-e com 500, tenta variar report_type (4 é o destino, mas tentamos 2→4 ou 4→2)
+        if p.xml_type == 2 and attempt == 1 and p.report_type != 4:
+            body["TypeXmlDownloadReport"] = 4
+        elif p.xml_type == 1 and attempt == 1 and p.report_type != 2:
+            body["TypeXmlDownloadReport"] = 2
+
+        exceptions.append(f"{resp.status_code}: {resp.text[:200]}")
+        await asyncio.sleep(0.7 * attempt)
+    else:
+        raise HTTPException(502, f"SIEG HTTP falhou: {exceptions}")
+
+    # podem retornar JSON {ArquivoBase64: ...} ou um string base64 simples
+    try:
+        if "application/json" in (resp.headers.get("content-type") or ""):
+            data = resp.json()
+            b64 = data.get("ArquivoBase64") or data.get("Base64") or data.get("File") or data.get("Data")
+        else:
+            b64 = resp.text.strip().strip('"')
+    except Exception:
+        b64 = resp.text.strip().strip('"')
+
+    try:
+        xlsx_bytes = base64.b64decode(b64)
+    except Exception as e:
+        raise HTTPException(500, f"Falha ao decodificar Base64 do relatório SIEG: {e}")
+
     wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
     ws = wb.active
     data = list(ws.values)
@@ -480,13 +507,19 @@ async def _fetch_sieg_month(p: SiegReportParams) -> pd.DataFrame:
             s.where(~s.str.contains("CANCEL", na=False), "CANCELADA")
              .where(~s.str.contains("AUTORI", na=False), "AUTORIZADA")
         )
+
     return df.drop_duplicates(subset=["CHAVE"]) if "CHAVE" in df.columns else df
 
 async def fetch_sieg_period(cnpj: str, tipo: TipoDocumento, di: date, df: date) -> pd.DataFrame:
     xml_type = 1 if tipo == TipoDocumento.NFE else 2
+    report_type = _sieg_report_type_for(tipo)
     frames = []
     for (y, m) in _month_range(di, df):
-        frames.append(await _fetch_sieg_month(SiegReportParams(cnpj=cnpj, xml_type=xml_type, year=y, month=m)))
+        frames.append(
+            await _fetch_sieg_month(
+                SiegReportParams(cnpj=cnpj, xml_type=xml_type, year=y, month=m, report_type=report_type)
+            )
+        )
     if not frames:
         return pd.DataFrame()
     out = pd.concat(frames, ignore_index=True)
@@ -528,12 +561,14 @@ def cross_check(df_dom: pd.DataFrame, df_sieg: pd.DataFrame) -> Tuple[pd.DataFra
         raise HTTPException(500, "Coluna CHAVE não encontrada em uma das fontes.")
     left = df_sieg.merge(df_dom, on="CHAVE", how="left", suffixes=("_SIEG", "_DOM"))
 
+    # faltantes: existem no SIEG e não no Domínio
     if "STATUS_DOM" in left.columns:
         faltantes = left[left["STATUS_DOM"].isna()].copy()
     else:
         dom_cols = [c for c in left.columns if c.endswith("_DOM")]
         faltantes = left[left[dom_cols].isna().all(axis=1)].copy()
 
+    # divergências de situação
     if "STATUS_DOM_NORM" in left.columns and "STATUS_SIEG_NORM" in left.columns:
         diverg = left[
             (~left["STATUS_DOM_NORM"].isna()) &
