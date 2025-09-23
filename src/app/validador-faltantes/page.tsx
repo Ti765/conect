@@ -1,122 +1,166 @@
-"use client"
+"use client";
 
-import React, { useState } from "react"
-import { exportReport } from "./service"
-import type { ValidatePayload } from "./types"
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
+import { useToast } from "@/hooks/use-toast";
+import { exportReport } from "./service";
 
 export default function ValidadorFaltantesPage() {
-  const [payload, setPayload] = useState<Partial<ValidatePayload>>({
-    tipo_documento: "NFE",
-    direcao: "ENTRADA",
-  })
-  const [loading, setLoading] = useState(false)
+  const [empresa, setEmpresa] = useState<string>("");
+  const [dataIni, setDataIni] = useState<string>("");
+  const [dataFim, setDataFim] = useState<string>("");
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const { toast } = useToast();
 
-  const handleChange = (k: keyof ValidatePayload, v: any) =>
-    setPayload((prev: Partial<ValidatePayload>) => ({ ...prev, [k]: v }))
+  // --- helpers --------------------------------------------------------------
+  function diasEntre(a: string, b: string) {
+    if (!a || !b) return 0;
+    const d1 = new Date(a + "T00:00:00");
+    const d2 = new Date(b + "T00:00:00");
+    const diff = Math.abs(d2.getTime() - d1.getTime());
+    return Math.floor(diff / (1000 * 60 * 60 * 24));
+  }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setLoading(true)
+  async function handleSubmit() {
+    // validações simples
+    if (!empresa || !dataIni || !dataFim) {
+      toast({
+        variant: "destructive",
+        title: "Preencha código da empresa e o período.",
+      });
+      return;
+    }
+    if (new Date(dataFim) < new Date(dataIni)) {
+      toast({
+        variant: "destructive",
+        title: "Data fim não pode ser anterior à data início.",
+      });
+      return;
+    }
+    if (diasEntre(dataIni, dataFim) > 92) {
+      toast({
+        variant: "destructive",
+        title: "O período máximo é de 3 meses.",
+      });
+      return;
+    }
+
     try {
-      const body = payload as ValidatePayload
-      const res = await exportReport(body)
-      if (!res.ok) throw new Error("Erro no servidor")
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement("a")
-      a.href = url
-      a.download = `relatorio-faltantes.xlsx`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(url)
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error(err)
-      alert("Falha ao gerar relatório")
+      setRunning(true);
+      setProgress(10);
+
+      // corpo mínimo: somente o que o backend precisa
+      const body = {
+        codi_emp: Number(empresa),
+        data_inicio: dataIni,
+        data_fim: dataFim,
+      };
+
+      const res = await exportReport(body); // POST /api/validador-faltantes/export
+      setProgress(70);
+
+      if (!res.ok) {
+        let msg = "Falha ao gerar relatório.";
+        try {
+          const j = await res.json();
+          msg = j?.error || msg;
+        } catch {
+          // ignore
+        }
+        throw new Error(msg);
+      }
+
+      const dispo = res.headers.get("content-disposition") ?? "";
+      const match = dispo.match(/filename="?([^"]+)"?/i);
+      const filename =
+        match?.[1] || `validador_faltantes_${empresa}_${dataIni}_${dataFim}.xlsx`;
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      setProgress(100);
+      toast({ title: "Relatório gerado. Download iniciado." });
+    } catch (err: any) {
+      toast({
+        variant: "destructive",
+        title: "Erro ao gerar relatório",
+        description: err?.message ?? String(err),
+      });
     } finally {
-      setLoading(false)
+      setRunning(false);
+      setTimeout(() => setProgress(0), 1200);
     }
   }
 
+  // --- render ---------------------------------------------------------------
   return (
-    <main className="p-6">
-      <h1 className="text-2xl font-semibold mb-4">Validador de Notas Faltantes</h1>
-      <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-3 max-w-xl">
-        <label className="flex flex-col">
-          Código da empresa
-          <input
-            type="number"
-            required
-            onChange={(e) => handleChange("codi_emp", Number(e.target.value))}
-            className="border rounded px-2 py-1"
-          />
-        </label>
+    <div className="space-y-8">
+      <Card className="shadow-lg">
+        <CardHeader>
+          <CardTitle>Validador de Notas Faltantes</CardTitle>
+          <CardDescription>
+            Informe o <strong>código da empresa</strong> e o{" "}
+            <strong>período</strong> (máx. 3 meses). O backend identifica o CNPJ e
+            analisa entradas e saídas automaticamente.
+          </CardDescription>
+        </CardHeader>
 
-        <label className="flex flex-col">
-          CNPJ da empresa
-          <input
-            type="text"
-            required
-            onChange={(e) => handleChange("cnpj_empresa", e.target.value)}
-            className="border rounded px-2 py-1"
-          />
-        </label>
+        <CardContent className="space-y-6">
+          <div className="grid md:grid-cols-3 gap-4">
+            <div>
+              <Label>Código da Empresa</Label>
+              <Input
+                inputMode="numeric"
+                placeholder="Ex.: 586"
+                value={empresa}
+                onChange={(e) => setEmpresa(e.target.value)}
+              />
+            </div>
 
-        <label className="flex flex-col">
-          Tipo de documento
-          <select
-            defaultValue="NFE"
-            onChange={(e) => handleChange("tipo_documento", e.target.value)}
-            className="border rounded px-2 py-1"
-          >
-            <option value="NFE">NFE</option>
-            <option value="CTE">CTE</option>
-          </select>
-        </label>
+            <div>
+              <Label>Data Inicial</Label>
+              <Input
+                type="date"
+                value={dataIni}
+                onChange={(e) => setDataIni(e.target.value)}
+              />
+            </div>
 
-        <label className="flex flex-col">
-          Direção
-          <select
-            defaultValue="ENTRADA"
-            onChange={(e) => handleChange("direcao", e.target.value)}
-            className="border rounded px-2 py-1"
-          >
-            <option value="ENTRADA">ENTRADA</option>
-            <option value="SAIDA">SAIDA</option>
-          </select>
-        </label>
+            <div>
+              <Label>Data Final</Label>
+              <Input
+                type="date"
+                value={dataFim}
+                onChange={(e) => setDataFim(e.target.value)}
+              />
+            </div>
+          </div>
 
-        <label className="flex flex-col">
-          Data início
-          <input
-            type="date"
-            required
-            onChange={(e) => handleChange("data_inicio", e.target.value)}
-            className="border rounded px-2 py-1"
-          />
-        </label>
+          <Button onClick={handleSubmit} disabled={running}>
+            {running ? "Gerando…" : "Gerar Relatório"}
+          </Button>
 
-        <label className="flex flex-col">
-          Data fim
-          <input
-            type="date"
-            required
-            onChange={(e) => handleChange("data_fim", e.target.value)}
-            className="border rounded px-2 py-1"
-          />
-        </label>
-
-        <div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="bg-blue-600 text-white px-4 py-2 rounded disabled:opacity-60"
-          >
-            {loading ? "Gerando..." : "Gerar relatório"}
-          </button>
-        </div>
-      </form>
-    </main>
-  )
+          {progress > 0 && <Progress value={progress} className="h-2" />}
+        </CardContent>
+      </Card>
+    </div>
+  );
 }

@@ -1,10 +1,18 @@
-import { FileText, Package, Truck, BarChart2, Bot, Key, LayoutDashboard } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { FileText, Package, Truck, Key, LayoutDashboard } from "lucide-react";
 
-export const navItems = [
+export type NavItem = {
+  title: string;
+  href: string;
+  icon: LucideIcon;
+  label?: string;
+};
+
+export const navItems: NavItem[] = [
   {
-    title: "Dashboard", // Added back
-    href: "/", // Assuming the dashboard is at the root
-    icon: LayoutDashboard, // Added appropriate icon
+    title: "Dashboard",
+    href: "/",
+    icon: LayoutDashboard,
     label: "Dashboard",
   },
   {
@@ -19,8 +27,15 @@ export const navItems = [
     icon: Truck,
     label: "CT-e",
   },
-  // Removido: Separar XML por Tipo
-  // Removido: Análise de Divergências Fiscais
+
+  // NOVO: Validador de Notas Faltantes
+  {
+    title: "Validador de Notas Faltantes",
+    href: "/validador-faltantes",
+    icon: FileText,
+    label: "Validador",
+  },
+
   {
     title: "Corrigir Chave de Acesso",
     href: "/correct-access-key",

@@ -1,7 +1,11 @@
+import argparse
+import asyncio
 import base64
 import io
 import logging
 import os
+import re
+import tempfile
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -14,16 +18,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, validator
 
-# ------------------------------------------------------------------------------
-# Load .env & Logging
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Setup (.env + LOG)
+# ==============================================================================
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("fiscalflow")
+LOG_LEVEL = os.getenv("FISCALFLOW_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+log = logging.getLogger("fiscalflow.validator")
 
-# ------------------------------------------------------------------------------
-# Helper: garantir que o SQL Anywhere 17 esteja no PATH (Windows)
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# SQL Anywhere PATH (Windows)
+# ==============================================================================
 def _ensure_sqlany_path():
     base = os.getenv("SQLANY_BASE")
     if not base:
@@ -38,16 +46,18 @@ def _ensure_sqlany_path():
     prepend = [p for p in candidates if os.path.isdir(p) and p not in current_path]
     if prepend:
         os.environ["PATH"] = ";".join(prepend + [current_path])
+        log.debug("PATH atualizado com SQL Anywhere: %s", os.environ["PATH"])
 
 _ensure_sqlany_path()
 
-# ------------------------------------------------------------------------------
-# Env: ODBC
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# ENV HELPERS
+# ==============================================================================
 def _get(env: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(env)
     return v if (v is not None and str(v).strip() != "") else default
 
+# ODBC
 SQLANY_DRIVER     = _get("SQLANY_DRIVER", "SQL Anywhere 17")
 SQLANY_SERVERNAME = _get("SQLANY_SERVERNAME", "")  # opcional
 SQLANY_HOST       = _get("SQLANY_HOST", "127.0.0.1")
@@ -56,83 +66,88 @@ SQLANY_DB         = _get("SQLANY_DB") or _get("SQLANY_DBNAME", "contabil")
 SQLANY_USER       = _get("SQLANY_USER") or _get("SQLANY_UID", "dba")
 SQLANY_PASSWORD   = _get("SQLANY_PASSWORD") or _get("SQLANY_PWD", "sql")
 
-# Domínio schema/tables/columns
-DOM_SCHEMA    = _get("DOM_SCHEMA", "bethadba")
-TB_ENTRADAS   = _get("TB_ENTRADAS", "EFENTRADAS")
-TB_FORNECEDOR = _get("TB_FORNECEDOR", "EFFORNECE")
+# Domínio – schema / TABELAS / COLUNAS
+DOM_SCHEMA       = _get("DOM_SCHEMA", "bethadba")
 
-COL_CHAVE_ENT  = _get("COL_CHAVE_ENT", "CHAVE_NFE")
-COL_STATUS_ENT = _get("COL_STATUS_ENT", "SITU_NFE")
-COL_NUMERO_ENT = _get("COL_NUMERO_ENT", "NFIS_ENT")
-COL_SERIE_ENT  = _get("COL_SERIE_ENT", "SERI_ENT")
-COL_DEMI_ENT   = _get("COL_DEMI_ENT", "DEMI_ENT")
-COL_DENT_ENT   = _get("COL_DENT_ENT", "DDOC_ENT")
-COL_VALOR_ENT  = _get("COL_VALOR_ENT", "VLRT_ENT")
+# ENTRADAS
+TB_ENTRADAS      = _get("TB_ENTRADAS", "EFENTRADAS")
+TB_FORNECEDOR    = _get("TB_FORNECEDOR", "EFFORNECE")
+COL_CHAVE_ENT    = _get("COL_CHAVE_ENT", "CHAVE_NFE")
+COL_STATUS_ENT   = _get("COL_STATUS_ENT", "SITU_NFE")
+COL_NUMERO_ENT   = _get("COL_NUMERO_ENT", "NFIS_ENT")
+COL_SERIE_ENT    = _get("COL_SERIE_ENT", "SERI_ENT")
+COL_DEMI_ENT     = _get("COL_DEMI_ENT", "DEMI_ENT")
+COL_DENT_ENT     = _get("COL_DENT_ENT", "DDOC_ENT")   # data de entrada
+COL_VALOR_ENT    = _get("COL_VALOR_ENT", "VLRT_ENT")
+COL_COD_FOR      = _get("COL_COD_FOR", "CODI_FOR")
+COL_CNPJ_FOR     = _get("COL_CNPJ_FOR", "CGCE_FOR")
 
-COL_COD_FOR   = _get("COL_COD_FOR", "CODI_FOR")
-COL_CNPJ_FOR  = _get("COL_CNPJ_FOR", "CGCE_FOR")
+# SAÍDAS
+TB_SAIDAS        = _get("TB_SAIDAS", "EFSAIDAS")
+TB_CLIENTES      = _get("TB_CLIENTES", "EFCLIENTE")
+COL_CHAVE_SAI    = _get("COL_CHAVE_SAI", "CHAVE_NFE")
+COL_STATUS_SAI   = _get("COL_STATUS_SAI", "SITU_NFE")
+COL_NUMERO_SAI   = _get("COL_NUMERO_SAI", "NFIS_SAI")
+COL_SERIE_SAI    = _get("COL_SERIE_SAI", "SERI_SAI")
+COL_DEMI_SAI     = _get("COL_DEMI_SAI", "DEMI_SAI")   # data de emissão
+COL_VALOR_SAI    = _get("COL_VALOR_SAI", "VLRT_SAI")
+COL_COD_CLI      = _get("COL_COD_CLI", "CODI_CLI")
+COL_CNPJ_CLI     = _get("COL_CNPJ_CLI", "CGCE_CLI")
 
-MODELO_DOM_NFE = int(_get("MODELO_DOM_NFE", "36"))
-MODELO_DOM_CTE = int(_get("MODELO_DOM_CTE", "56"))
+# EMPRESA (para descobrir CNPJ por CODI_EMP)
+TB_EMPRESA       = _get("TB_EMPRESA", "EFEMPRESA")
+COL_CNPJ_EMP     = _get("COL_CNPJ_EMP", "")
+
+# Modelos
+MODELO_DOM_NFE   = int(_get("MODELO_DOM_NFE", "36"))  # NFe (55)
+MODELO_DOM_CTE   = int(_get("MODELO_DOM_CTE", "56"))  # CTe (57)
 
 # SIEG
-SIEG_API_KEY      = _get("SIEG_API_KEY", "")
-SIEG_BASE_URL     = _get("SIEG_BASE_URL", "https://api.sieg.com")
-SIEG_REPORT_TYPE  = int(_get("SIEG_REPORT_TYPE", "2"))
-SIEG_TIMEOUT      = float(_get("SIEG_TIMEOUT", "60"))
+SIEG_API_KEY     = _get("SIEG_API_KEY", "")
+SIEG_BASE_URL    = _get("SIEG_BASE_URL", "https://api.sieg.com")
+SIEG_REPORT_TYPE = int(_get("SIEG_REPORT_TYPE", "2"))
+SIEG_TIMEOUT     = float(_get("SIEG_TIMEOUT", "60"))
 
-# ------------------------------------------------------------------------------
-# Conexão ODBC (robusta para SERVERNAME e/ou HOST/PORT)
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Conexão ODBC
+# ==============================================================================
 def odbc_connect() -> pyodbc.Connection:
     parts = []
-    parts.append(f"DRIVER={{{SQL Anywhere 17}}}" if SQLANY_DRIVER == "SQL Anywhere 17"
-                 else f"DRIVER={{{{}}}}".format(SQLANY_DRIVER))
-    # SERVERNAME (se informado)
+    # monta DRIVER={NOME}
+    driver_part = "DRIVER={" + (SQLANY_DRIVER or "SQL Anywhere 17") + "}"
+    parts.append(driver_part)
     if SQLANY_SERVERNAME:
         parts.append(f"SERVERNAME={SQLANY_SERVERNAME}")
-    # HOST/PORT (usaremos sempre; o driver ignora se não precisar)
     if SQLANY_HOST:
         parts.append(f"HOST={SQLANY_HOST}")
     if SQLANY_PORT:
         parts.append(f"PORT={SQLANY_PORT}")
-    # DB e credenciais
     parts.append(f"DATABASE={SQLANY_DB}")
     parts.append(f"UID={SQLANY_USER}")
     parts.append(f"PWD={SQLANY_PASSWORD}")
-    # Opcionalmente, dá para acrescentar: "AutoStop=No;INTLTOUTF8=Yes"
     conn_str = ";".join(parts) + ";"
     log.debug("ODBC connection string: %s", conn_str)
     try:
         return pyodbc.connect(conn_str, autocommit=True)
     except pyodbc.Error as e:
+        log.exception("Falha ODBC")
         raise HTTPException(status_code=500, detail=f"Erro ODBC: {e}")
 
-# ------------------------------------------------------------------------------
-# Modelos da API
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Modelos / Enums
+# ==============================================================================
 class TipoDocumento(str):
     NFE = "NFE"
     CTE = "CTE"
 
 class Direcao(str):
     ENTRADA = "ENTRADA"
-    SAIDA = "SAIDA"  # futuro
+    SAIDA = "SAIDA"
 
-class ValidatePayload(BaseModel):
+class MinimalPayload(BaseModel):
     codi_emp: int = Field(..., description="Código da empresa no Domínio")
-    cnpj_empresa: str = Field(..., description="CNPJ da empresa (somente números)")
-    tipo_documento: TipoDocumento
-    direcao: Direcao
     data_inicio: date
     data_fim: date
-
-    @validator("cnpj_empresa")
-    def _only_digits_cnpj(cls, v):
-        d = "".join(ch for ch in v if ch.isdigit())
-        if len(d) != 14:
-            raise ValueError("CNPJ deve ter 14 dígitos.")
-        return d
 
     @validator("data_fim")
     def _range_ok(cls, v, values):
@@ -140,12 +155,42 @@ class ValidatePayload(BaseModel):
         if di and v < di:
             raise ValueError("data_fim anterior a data_inicio.")
         if di and (v - di).days > 92:
-            raise ValueError("Período máximo de 3 meses.")
+            raise ValueError("Período máximo de 3 meses (92 dias).")
         return v
 
-# ------------------------------------------------------------------------------
-# Domínio: consulta entradas (NF-e e CT-e tomados)
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Util: descobrir CNPJ da empresa
+# ==============================================================================
+CANDIDATE_CNPJ_COLS = ["CGC_CIA", "CGC", "CGC_EMP", "CNPJ", "CGCE_EMP", "CNPJ_EMP"]
+
+def get_cnpj_empresa(emp: int) -> str:
+    with odbc_connect() as conn:
+        cur = conn.cursor()
+        cols_try = [COL_CNPJ_EMP] if COL_CNPJ_EMP else CANDIDATE_CNPJ_COLS
+        last_err = None
+        for col in cols_try:
+            try:
+                sql = f"SELECT {col} FROM {DOM_SCHEMA}.{TB_EMPRESA} WHERE CODI_EMP = ?"
+                log.debug("SQL CNPJ empresa: %s", sql)
+                cur.execute(sql, (emp,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    cnpj = re.sub(r"\D", "", str(row[0]))
+                    if len(cnpj) == 14:
+                        log.info("CNPJ empresa %s obtido por coluna %s: %s", emp, col, cnpj)
+                        return cnpj
+            except Exception as e:
+                last_err = e
+                continue
+        msg = f"Não foi possível obter o CNPJ para CODI_EMP={emp}. Ajuste TB_EMPRESA/COL_CNPJ_EMP no .env"
+        if last_err:
+            msg += f" (último erro: {last_err})"
+        log.error(msg)
+        raise HTTPException(500, msg)
+
+# ==============================================================================
+# Queries Domínio – ENTRADAS
+# ==============================================================================
 def query_dom_entradas(emp: int, tipo: TipoDocumento, di: date, df: date) -> pd.DataFrame:
     modelo = MODELO_DOM_NFE if tipo == TipoDocumento.NFE else MODELO_DOM_CTE
     cols = [
@@ -172,29 +217,73 @@ def query_dom_entradas(emp: int, tipo: TipoDocumento, di: date, df: date) -> pd.
          AND nf.{COL_DENT_ENT} BETWEEN DATE(?) AND DATE(?)
          AND nf.{COL_CHAVE_ENT} IS NOT NULL
     """
+    log.debug("SQL ENTRADAS (%s): %s", tipo, sql)
     with odbc_connect() as conn:
         df = pd.read_sql(sql, conn, params=(emp, modelo, di.isoformat(), df.isoformat()))
 
-    # Normalizações
     if "CNPJ_EMITENTE" in df.columns:
         df["CNPJ_EMITENTE"] = df["CNPJ_EMITENTE"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(14)
     if "CHAVE" in df.columns:
         df["CHAVE"] = df["CHAVE"].astype(str).str.replace(r"\D", "", regex=True)
 
-    # Normaliza status (ajuste os mapeamentos conforme seus códigos)
     if "STATUS_DOM" in df.columns:
         s = df["STATUS_DOM"].astype(str).str.upper()
-        df["STATUS_DOM_NORM"] = s.map({
-            "00": "AUTORIZADA",
-            "02": "CANCELADA",
-            "01": "DENEGADA",
-        }).fillna(s)
+        df["STATUS_DOM_NORM"] = s.map({"00": "AUTORIZADA", "02": "CANCELADA", "01": "DENEGADA"}).fillna(s)
 
+    log.info("Domínio ENTRADAS %s: %s linhas", tipo, len(df))
     return df
 
-# ------------------------------------------------------------------------------
-# SIEG /api/relatorio/xml  -> DataFrame (CHAVE/STATUS/MODELO)
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Queries Domínio – SAÍDAS (NFe)
+# ==============================================================================
+def query_dom_saidas(emp: int, tipo: TipoDocumento, di: date, df: date) -> pd.DataFrame:
+    if tipo == TipoDocumento.CTE:
+        log.info("CT-e SAÍDA ignorado por regra (somente tomados).")
+        return pd.DataFrame(columns=["CHAVE"])
+
+    modelo = MODELO_DOM_NFE
+    cols = [
+        f"sf.{COL_CHAVE_SAI} AS CHAVE",
+        f"sf.{COL_STATUS_SAI} AS STATUS_DOM",
+        f"sf.{COL_DEMI_SAI} AS DATA_EMISSAO",
+        "sf.CODI_EMP",
+        "sf.CODI_ESP AS MODELO_DOM",
+        f"cli.{COL_CNPJ_CLI} AS CNPJ_DESTINATARIO",
+    ]
+    if COL_SERIE_SAI:  cols.append(f"sf.{COL_SERIE_SAI} AS SERIE")
+    if COL_NUMERO_SAI: cols.append(f"sf.{COL_NUMERO_SAI} AS NUMERO")
+    if COL_VALOR_SAI:  cols.append(f"sf.{COL_VALOR_SAI} AS VALOR_TOTAL")
+
+    sql = f"""
+      SELECT {", ".join(cols)}
+        FROM {DOM_SCHEMA}.{TB_SAIDAS} sf
+   LEFT JOIN {DOM_SCHEMA}.{TB_CLIENTES} cli
+          ON cli.CODI_EMP = sf.CODI_EMP
+         AND cli.{COL_COD_CLI} = sf.{COL_COD_CLI}
+       WHERE sf.CODI_EMP = ?
+         AND sf.CODI_ESP = ?
+         AND sf.{COL_DEMI_SAI} BETWEEN DATE(?) AND DATE(?)
+         AND sf.{COL_CHAVE_SAI} IS NOT NULL
+    """
+    log.debug("SQL SAIDAS (%s): %s", tipo, sql)
+    with odbc_connect() as conn:
+        df = pd.read_sql(sql, conn, params=(emp, modelo, di.isoformat(), df.isoformat()))
+
+    if "CNPJ_DESTINATARIO" in df.columns:
+        df["CNPJ_DESTINATARIO"] = df["CNPJ_DESTINATARIO"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(14)
+    if "CHAVE" in df.columns:
+        df["CHAVE"] = df["CHAVE"].astype(str).str.replace(r"\D", "", regex=True)
+
+    if "STATUS_DOM" in df.columns:
+        s = df["STATUS_DOM"].astype(str).str.upper()
+        df["STATUS_DOM_NORM"] = s.map({"00": "AUTORIZADA", "02": "CANCELADA", "01": "DENEGADA"}).fillna(s)
+
+    log.info("Domínio SAIDAS %s: %s linhas", tipo, len(df))
+    return df
+
+# ==============================================================================
+# SIEG – /api/relatorio/xml
+# ==============================================================================
 class SiegReportParams(BaseModel):
     cnpj: str
     xml_type: int    # 1=NFe, 2=CTe
@@ -213,24 +302,27 @@ def _month_range(di: date, df: date) -> List[Tuple[int, int]]:
 
 def _detect_cols(cols: List[str]) -> Dict[str, Optional[str]]:
     lc = [c.lower() for c in cols]
-    def find(cands: List[str]) -> Optional[str]:
-        for c in cands:
+    def find(subs: List[str]) -> Optional[str]:
+        for s in subs:
             for i, name in enumerate(lc):
-                if c in name:
+                if s in name:
                     return cols[i]
         return None
     return {
-        "chave": find(["chave", "chavenfe", "chavecte"]),
-        "status": find(["sit", "situacao", "status"]),
-        "modelo": find(["modelo", "xmltype", "tipo"]),
-        "emissao": find(["emiss", "emissao", "dt emi", "dh emi"]),
+        "chave":      find(["chave", "chavenfe", "chavecte"]),
+        "status":     find(["sit", "situacao", "status"]),
+        "modelo":     find(["modelo", "xmltype", "tipo"]),
+        "emissao":    find(["emiss", "emissao", "dt emi", "dh emi"]),
+        "cnpj_emit":  find(["emit", "emitente", "cnpj emit", "cnpj_emit"]),
+        "cnpj_dest":  find(["dest", "destinat", "cnpj dest", "cnpj_dest"]),
+        "cnpj_tom":   find(["tomador", "toma", "cnpj toma", "cnpj_tom"]),
+        "cnpj_rem":   find(["remet", "remetente", "cnpj rem", "cnpj_rem"]),
     }
 
 async def _fetch_sieg_month(p: SiegReportParams) -> pd.DataFrame:
     url = f"{SIEG_BASE_URL}/api/relatorio/xml"
     headers = {
         "Content-Type": "application/json",
-        # Mandamos em múltiplos formatos para compatibilidade:
         "x-api-key": SIEG_API_KEY,
         "api-key": SIEG_API_KEY,
         "ApiKey": SIEG_API_KEY,
@@ -247,7 +339,6 @@ async def _fetch_sieg_month(p: SiegReportParams) -> pd.DataFrame:
         resp = await client.post(url, headers=headers, json=body)
         if resp.status_code != 200:
             raise HTTPException(502, f"SIEG HTTP {resp.status_code}: {resp.text[:200]}")
-        # Algumas implantações retornam JSON {ArquivoBase64: ...}; outras retornam a string inline
         try:
             if "application/json" in (resp.headers.get("content-type") or ""):
                 data = resp.json()
@@ -257,11 +348,7 @@ async def _fetch_sieg_month(p: SiegReportParams) -> pd.DataFrame:
         except Exception:
             b64 = resp.text.strip().strip('"')
 
-    try:
-        xlsx_bytes = base64.b64decode(b64)
-    except Exception as e:
-        raise HTTPException(500, f"Falha ao decodificar Base64 do relatório SIEG: {e}")
-
+    xlsx_bytes = base64.b64decode(b64)
     wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
     ws = wb.active
     data = list(ws.values)
@@ -270,20 +357,25 @@ async def _fetch_sieg_month(p: SiegReportParams) -> pd.DataFrame:
     cols = [str(c) if c is not None else "" for c in data[0]]
     df = pd.DataFrame(data[1:], columns=cols)
 
-    # Renomeia colunas relevantes
     hint = _detect_cols(df.columns.tolist())
     rename = {}
-    if hint["chave"]:   rename[hint["chave"]] = "CHAVE"
-    if hint["status"]:  rename[hint["status"]] = "STATUS_SIEG"
-    if hint["modelo"]:  rename[hint["modelo"]] = "MODELO_SIEG"
-    if hint["emissao"]: rename[hint["emissao"]] = "DATA_EMISSAO_SIEG"
+    if hint["chave"]:      rename[hint["chave"]] = "CHAVE"
+    if hint["status"]:     rename[hint["status"]] = "STATUS_SIEG"
+    if hint["modelo"]:     rename[hint["modelo"]] = "MODELO_SIEG"
+    if hint["emissao"]:    rename[hint["emissao"]] = "DATA_EMISSAO_SIEG"
+    if hint["cnpj_emit"]:  rename[hint["cnpj_emit"]] = "CNPJ_EMIT_SIEG"
+    if hint["cnpj_dest"]:  rename[hint["cnpj_dest"]] = "CNPJ_DEST_SIEG"
+    if hint["cnpj_tom"]:   rename[hint["cnpj_tom"]] = "CNPJ_TOM_SIEG"
+    if hint["cnpj_rem"]:   rename[hint["cnpj_rem"]] = "CNPJ_REM_SIEG"
     if rename:
         df = df.rename(columns=rename)
 
-    # Normalizações
     if "CHAVE" in df.columns:
         df["CHAVE"] = df["CHAVE"].astype(str).str.replace(r"\D", "", regex=True)
         df = df[df["CHAVE"].str.len() >= 44]
+    for c in ["CNPJ_EMIT_SIEG", "CNPJ_DEST_SIEG", "CNPJ_TOM_SIEG", "CNPJ_REM_SIEG"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.replace(r"\D", "", regex=True).str.zfill(14)
     if "STATUS_SIEG" in df.columns:
         s = df["STATUS_SIEG"].astype(str).str.upper()
         df["STATUS_SIEG_NORM"] = (
@@ -299,65 +391,133 @@ async def fetch_sieg_period(cnpj: str, tipo: TipoDocumento, di: date, df: date) 
         frames.append(await _fetch_sieg_month(SiegReportParams(cnpj=cnpj, xml_type=xml_type, year=y, month=m)))
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    out = pd.concat(frames, ignore_index=True)
+    log.info("SIEG %s: %s linhas (bruto)", tipo, len(out))
+    return out
 
-# ------------------------------------------------------------------------------
-# Cruzamento e Excel
-# ------------------------------------------------------------------------------
+def _filter_sieg_por_direcao(df: pd.DataFrame, cnpj: str, tipo: TipoDocumento, direcao: Direcao) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if tipo == TipoDocumento.CTE:
+        if direcao == Direcao.SAIDA:
+            return pd.DataFrame(columns=df.columns)
+        mask = False
+        if "CNPJ_TOM_SIEG" in df.columns:
+            mask = (df["CNPJ_TOM_SIEG"] == cnpj)
+        if "CNPJ_DEST_SIEG" in df.columns:
+            mask = mask | (df["CNPJ_DEST_SIEG"] == cnpj)
+        return df[mask] if isinstance(mask, pd.Series) else df
+
+    if direcao == Direcao.ENTRADA:
+        if "CNPJ_DEST_SIEG" in df.columns:
+            return df[df["CNPJ_DEST_SIEG"] == cnpj]
+        return df
+    else:
+        if "CNPJ_EMIT_SIEG" in df.columns:
+            return df[df["CNPJ_EMIT_SIEG"] == cnpj]
+        return df
+
+# ==============================================================================
+# Cruzamento
+# ==============================================================================
 def cross_check(df_dom: pd.DataFrame, df_sieg: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if df_dom.empty and df_sieg.empty:
+        return pd.DataFrame(columns=["CHAVE"]), pd.DataFrame(columns=["CHAVE"])
+
     if "CHAVE" not in df_dom.columns or "CHAVE" not in df_sieg.columns:
         raise HTTPException(500, "Coluna CHAVE não encontrada em uma das fontes.")
     left = df_sieg.merge(df_dom, on="CHAVE", how="left", suffixes=("_SIEG", "_DOM"))
 
-    # faltantes = no SIEG e não no Domínio
     if "STATUS_DOM" in left.columns:
         faltantes = left[left["STATUS_DOM"].isna()].copy()
     else:
         dom_cols = [c for c in left.columns if c.endswith("_DOM")]
         faltantes = left[left[dom_cols].isna().all(axis=1)].copy()
 
-    # divergências (status diferente)
     if "STATUS_DOM_NORM" in left.columns and "STATUS_SIEG_NORM" in left.columns:
-        diverg = left[(~left["STATUS_DOM_NORM"].isna()) &
-                      (~left["STATUS_SIEG_NORM"].isna()) &
-                      (left["STATUS_DOM_NORM"] != left["STATUS_SIEG_NORM"])].copy()
+        diverg = left[
+            (~left["STATUS_DOM_NORM"].isna()) &
+            (~left["STATUS_SIEG_NORM"].isna()) &
+            (left["STATUS_DOM_NORM"] != left["STATUS_SIEG_NORM"])
+        ].copy()
     else:
         diverg = pd.DataFrame(columns=left.columns)
 
-    # Seleção de colunas úteis
     keep = [c for c in [
         "CHAVE",
         "STATUS_SIEG", "STATUS_SIEG_NORM",
         "STATUS_DOM", "STATUS_DOM_NORM",
         "DATA_EMISSAO", "DATA_ENTRADA", "DATA_EMISSAO_SIEG",
-        "SERIE", "NUMERO", "VALOR_TOTAL", "CNPJ_EMITENTE",
-        "MODELO_SIEG", "MODELO_DOM"
+        "SERIE", "NUMERO", "VALOR_TOTAL",
+        "CNPJ_EMITENTE", "CNPJ_DESTINATARIO",
+        "MODELO_SIEG", "MODELO_DOM",
+        "CNPJ_EMIT_SIEG", "CNPJ_DEST_SIEG", "CNPJ_TOM_SIEG"
     ] if c in left.columns]
     faltantes = faltantes[keep]
     diverg = diverg[keep]
     return faltantes, diverg
 
-def build_excel(faltantes: pd.DataFrame, diverg: pd.DataFrame, meta: Dict) -> bytes:
+# ==============================================================================
+# Excel
+# ==============================================================================
+def build_excel_multi(sheets: Dict[str, pd.DataFrame], resumo: Dict) -> bytes:
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        (faltantes if not faltantes.empty else pd.DataFrame(columns=["CHAVE"])).to_excel(writer, index=False, sheet_name="Faltantes")
-        (diverg if not diverg.empty else pd.DataFrame(columns=["CHAVE"])).to_excel(writer, index=False, sheet_name="Divergencias")
-        resumo = pd.DataFrame([{
-            "empresa": meta.get("empresa"),
-            "cnpj_empresa": meta.get("cnpj_empresa"),
-            "tipo_documento": meta.get("tipo_documento"),
-            "periodo": f'{meta.get("data_inicio")} a {meta.get("data_fim")}',
-            "qtde_sieg": meta.get("qtde_sieg"),
-            "qtde_dom": meta.get("qtde_dom"),
-            "faltantes": len(faltantes),
-            "divergencias": len(diverg),
-        }])
-        resumo.to_excel(writer, index=False, sheet_name="Resumo")
+        for name, df in sheets.items():
+            (df if not df.empty else pd.DataFrame(columns=["CHAVE"])).to_excel(
+                writer, index=False, sheet_name=name[:31]
+            )
+        pd.DataFrame([resumo]).to_excel(writer, index=False, sheet_name="Resumo")
     return bio.getvalue()
 
-# ------------------------------------------------------------------------------
-# FastAPI
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Orquestração
+# ==============================================================================
+async def generate_all(codi_emp: int, di: date, df: date) -> Tuple[bytes, str]:
+    cnpj = get_cnpj_empresa(codi_emp)
+    log.info("Empresa %s -> CNPJ %s | Período %s a %s", codi_emp, cnpj, di, df)
+
+    sheets: Dict[str, pd.DataFrame] = {}
+    totals: Dict[str, int] = {}
+
+    for tipo in (TipoDocumento.NFE, TipoDocumento.CTE):
+        df_sieg_bruto = await fetch_sieg_period(cnpj, tipo, di, df)
+
+        # ENTRADA
+        df_sieg_in = _filter_sieg_por_direcao(df_sieg_bruto, cnpj, tipo, Direcao.ENTRADA)
+        df_dom_in  = query_dom_entradas(codi_emp, tipo, di, df)
+        falt_in, div_in = cross_check(df_dom_in, df_sieg_in)
+        sheets[f"Faltantes_Entrada_{tipo}"]    = falt_in
+        sheets[f"Divergencias_Entrada_{tipo}"] = div_in
+        totals[f"qt_sieg_in_{tipo}"] = len(df_sieg_in)
+        totals[f"qt_dom_in_{tipo}"]  = len(df_dom_in)
+        totals[f"falt_in_{tipo}"]    = len(falt_in)
+        totals[f"div_in_{tipo}"]     = len(div_in)
+        log.info("[%s][Entrada] SIEG=%s DOM=%s FALT=%s DIV=%s",
+                 tipo, len(df_sieg_in), len(df_dom_in), len(falt_in), len(div_in))
+
+        # SAÍDA (somente NFE)
+        if tipo == TipoDocumento.NFE:
+            df_sieg_out = _filter_sieg_por_direcao(df_sieg_bruto, cnpj, tipo, Direcao.SAIDA)
+            df_dom_out  = query_dom_saidas(codi_emp, tipo, di, df)
+            falt_out, div_out = cross_check(df_dom_out, df_sieg_out)
+            sheets[f"Faltantes_Saida_{tipo}"]    = falt_out
+            sheets[f"Divergencias_Saida_{tipo}"] = div_out
+            totals[f"qt_sieg_out_{tipo}"] = len(df_sieg_out)
+            totals[f"qt_dom_out_{tipo}"]  = len(df_dom_out)
+            totals[f"falt_out_{tipo}"]    = len(falt_out)
+            totals[f"div_out_{tipo}"]     = len(div_out)
+            log.info("[%s][Saída] SIEG=%s DOM=%s FALT=%s DIV=%s",
+                     tipo, len(df_sieg_out), len(df_dom_out), len(falt_out), len(div_out))
+
+    resumo = {"empresa": codi_emp, "cnpj_empresa": cnpj, "periodo": f"{di} a {df}", **totals}
+    content = build_excel_multi(sheets, resumo)
+    filename = f"validador_faltantes_{codi_emp}_{di}_{df}.xlsx"
+    return content, filename
+
+# ==============================================================================
+# FastAPI (teste local)
+# ==============================================================================
 app = FastAPI(title="FiscalFlow - Validador de Notas Faltantes")
 
 @app.get("/health")
@@ -365,35 +525,43 @@ def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat() + "Z"}
 
 @app.post("/validator/export")
-async def validator_export(payload: ValidatePayload):
-    if payload.direcao != Direcao.ENTRADA:
-        raise HTTPException(400, "Direção SAIDA não implementada neste MVP. Use ENTRADA.")
-
-    # 1) Domínio
-    df_dom = query_dom_entradas(payload.codi_emp, payload.tipo_documento, payload.data_inicio, payload.data_fim)
-    log.info("Domínio: %s linhas", len(df_dom))
-
-    # 2) SIEG
-    df_sieg = await fetch_sieg_period(payload.cnpj_empresa, payload.tipo_documento, payload.data_inicio, payload.data_fim)
-    log.info("SIEG: %s linhas", len(df_sieg))
-
-    # 3) Cruzamento
-    faltantes, diverg = cross_check(df_dom, df_sieg)
-
-    # 4) Excel
-    meta = {
-        "empresa": payload.codi_emp,
-        "cnpj_empresa": payload.cnpj_empresa,
-        "tipo_documento": payload.tipo_documento,
-        "data_inicio": payload.data_inicio.isoformat(),
-        "data_fim": payload.data_fim.isoformat(),
-        "qtde_sieg": len(df_sieg),
-        "qtde_dom": len(df_dom),
-    }
-    content = build_excel(faltantes, diverg, meta)
-    filename = f"validador_faltantes_{payload.tipo_documento}_{payload.codi_emp}_{payload.data_inicio}_{payload.data_fim}.xlsx"
+async def validator_export(payload: MinimalPayload):
+    content, filename = await generate_all(payload.codi_emp, payload.data_inicio, payload.data_fim)
     return StreamingResponse(
         io.BytesIO(content),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
+# ==============================================================================
+# CLI
+# ==============================================================================
+def _parse_args():
+    p = argparse.ArgumentParser(description="Validador de Notas Faltantes (Entradas/Saídas)")
+    p.add_argument("--empresa", type=int, required=True, help="CODI_EMP")
+    p.add_argument("--data-ini", type=str, required=True, help="AAAA-MM-DD")
+    p.add_argument("--data-fim", type=str, required=True, help="AAAA-MM-DD")
+    p.add_argument("--out", type=str, default="", help="Caminho do XLSX (opcional)")
+    return p.parse_args()
+
+def _to_date(s: str) -> date:
+    return date.fromisoformat(s)
+
+def _save_temp_excel(content: bytes, preferred_name: str) -> str:
+    tmpdir = tempfile.gettempdir()
+    path = os.path.join(tmpdir, preferred_name)
+    with open(path, "wb") as f:
+        f.write(content)
+    return path
+
+if __name__ == "__main__":
+    args = _parse_args()
+    di = _to_date(args.data_ini)
+    df_ = _to_date(args.data_fim)
+    try:
+        content, fname = asyncio.run(generate_all(args.empresa, di, df_))
+        out_path = args.out or _save_temp_excel(content, fname)
+        print(f"XLSX_OK:{out_path}", flush=True)
+    except Exception:
+        log.exception("Falha na execução CLI")
+        raise

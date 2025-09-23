@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, ChangeEvent } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -13,145 +13,128 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
+import { exportReport } from "./service";
 
-export default function ClassifySuppliersPage() {
-  const [empresa, setEmpresa]   = useState("");
-  const [dataIni, setDataIni]   = useState("");
-  const [dataFim, setDataFim]   = useState("");
-  const [files, setFiles]       = useState<File[]>([]);
-  const [running, setRunning]   = useState(false);
+export default function ValidadorFaltantesPage() {
+  const [empresa, setEmpresa] = useState<string>("");
+  const [dataIni, setDataIni] = useState<string>("");
+  const [dataFim, setDataFim] = useState<string>("");
+  const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
-
   const { toast } = useToast();
-  const inputRef  = useRef<HTMLInputElement>(null);
 
-  /* --------------------------------------------------------------- */
-  /* Handlers                                                        */
-  /* --------------------------------------------------------------- */
-  function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
-    if (e.target.files) setFiles(Array.from(e.target.files));
+  // --- helpers --------------------------------------------------------------
+  function diasEntre(a: string, b: string) {
+    if (!a || !b) return 0;
+    const d1 = new Date(a + "T00:00:00");
+    const d2 = new Date(b + "T00:00:00");
+    const diff = Math.abs(d2.getTime() - d1.getTime());
+    return Math.floor(diff / (1000 * 60 * 60 * 24));
   }
 
   async function handleSubmit() {
-    if (!empresa || !dataIni || !dataFim || files.length === 0) {
+    // validações simples
+    if (!empresa || !dataIni || !dataFim) {
       toast({
         variant: "destructive",
-        title: "Preencha todos os campos e selecione a pasta!",
+        title: "Preencha código da empresa e o período.",
       });
       return;
     }
-
-    /* monta o multipart */
-    const form = new FormData();
-    form.append("empresa", empresa);
-    form.append("dataIni", dataIni);
-    form.append("dataFim", dataFim);
-    files.forEach((f) =>
-      form.append("files", f, (f as any).webkitRelativePath || f.name)
-    );
+    if (new Date(dataFim) < new Date(dataIni)) {
+      toast({
+        variant: "destructive",
+        title: "Data fim não pode ser anterior à data início.",
+      });
+      return;
+    }
+    if (diasEntre(dataIni, dataFim) > 92) {
+      toast({
+        variant: "destructive",
+        title: "O período máximo é de 3 meses.",
+      });
+      return;
+    }
 
     try {
       setRunning(true);
       setProgress(10);
 
-      const res = await fetch("/api/classify-suppliers", {
-        method: "POST",
-        body: form,
-      });
+      // corpo mínimo: somente o que o backend precisa
+      const body = {
+        codi_emp: Number(empresa),
+        data_inicio: dataIni,
+        data_fim: dataFim,
+      };
+
+      const res = await exportReport(body); // POST /api/validador-faltantes/export
+      setProgress(70);
 
       if (!res.ok) {
-        /* tenta extrair JSON de erro */
-        let msg = "Falha desconhecida";
+        let msg = "Falha ao gerar relatório.";
         try {
-          const data = await res.json();
-          msg = data.error ?? msg;
-        } catch (_) {}
+          const j = await res.json();
+          msg = j?.error || msg;
+        } catch {
+          // ignore
+        }
         throw new Error(msg);
       }
 
-      /* se OK, pode vir ZIP ou JSON de sucesso */
-      const ctype = res.headers.get("content-type") ?? "";
+      const dispo = res.headers.get("content-disposition") ?? "";
+      const match = dispo.match(/filename="?([^"]+)"?/i);
+      const filename =
+        match?.[1] || `validador_faltantes_${empresa}_${dataIni}_${dataFim}.xlsx`;
 
-      if (ctype.includes("application/zip")) {
-        /* ↓↓↓ inicia download automático ↓↓↓ */
-        const blob = await res.blob();
-        const dispo = res.headers.get("content-disposition") ?? "";
-        const match = dispo.match(/filename="?([^"]+)"?/i);
-        const filename = match?.[1] || "classificados.zip";
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
 
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-
-        setProgress(100);
-        toast({ title: "Classificação concluída. Download iniciado." });
-      } else {
-        /* fallback – espera JSON padrão { ok: true } */
-        const data = await res.json();
-        if (!data.ok) throw new Error(data.error || "Falha desconhecida");
-        setProgress(100);
-        toast({ title: "Classificação concluída." });
-      }
+      setProgress(100);
+      toast({ title: "Relatório gerado. Download iniciado." });
     } catch (err: any) {
       toast({
         variant: "destructive",
-        title: "Erro ao classificar",
-        description: err.message,
+        title: "Erro ao gerar relatório",
+        description: err?.message ?? String(err),
       });
     } finally {
       setRunning(false);
-      setTimeout(() => setProgress(0), 1500);
+      setTimeout(() => setProgress(0), 1200);
     }
   }
 
-  /* --------------------------------------------------------------- */
-  /* Render                                                          */
-  /* --------------------------------------------------------------- */
+  // --- render ---------------------------------------------------------------
   return (
     <div className="space-y-8">
-      <Card>
+      <Card className="shadow-lg">
         <CardHeader>
-          <CardTitle>Classificar Fornecedores</CardTitle>
+          <CardTitle>Validador de Notas Faltantes</CardTitle>
           <CardDescription>
-            Selecione a pasta de entradas, informe empresa e período, depois
-            clique em Iniciar.
+            Informe o <strong>código da empresa</strong> e o{" "}
+            <strong>período</strong> (máx. 3 meses). O backend identifica o CNPJ e
+            analisa entradas e saídas automaticamente.
           </CardDescription>
         </CardHeader>
 
         <CardContent className="space-y-6">
-          {/* Seletor de pasta */}
-          <div>
-            <Label>Diretório de Entradas (arraste ou clique)</Label>
-            <Input
-              ref={inputRef}
-              type="file"
-              webkitdirectory="true"
-              multiple
-              onChange={handleFileChange}
-              className="cursor-pointer"
-            />
-            <p className="text-xs text-muted-foreground">
-              {files.length
-                ? `${files.length} arquivo(s) selecionado(s)`
-                : "Nenhum arquivo selecionado."}
-            </p>
-          </div>
-
-          {/* Empresa / Datas */}
           <div className="grid md:grid-cols-3 gap-4">
             <div>
               <Label>Código da Empresa</Label>
               <Input
+                inputMode="numeric"
+                placeholder="Ex.: 586"
                 value={empresa}
                 onChange={(e) => setEmpresa(e.target.value)}
-                placeholder="586"
               />
             </div>
+
             <div>
               <Label>Data Inicial</Label>
               <Input
@@ -160,6 +143,7 @@ export default function ClassifySuppliersPage() {
                 onChange={(e) => setDataIni(e.target.value)}
               />
             </div>
+
             <div>
               <Label>Data Final</Label>
               <Input
@@ -171,7 +155,7 @@ export default function ClassifySuppliersPage() {
           </div>
 
           <Button onClick={handleSubmit} disabled={running}>
-            {running ? "Processando…" : "Iniciar Classificação"}
+            {running ? "Gerando…" : "Gerar Relatório"}
           </Button>
 
           {progress > 0 && <Progress value={progress} className="h-2" />}
