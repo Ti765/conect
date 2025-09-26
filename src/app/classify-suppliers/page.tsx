@@ -13,9 +13,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
-import { exportReport } from "./service";
+import {
+  classifySuppliers,
+  type ClassifySupplierRequest,
+} from "@/app/classify-suppliers/service";
 
-export default function ValidadorFaltantesPage() {
+export default function ClassifySuppliersPage() {
   const [empresa, setEmpresa] = useState<string>("");
   const [dataIni, setDataIni] = useState<string>("");
   const [dataFim, setDataFim] = useState<string>("");
@@ -60,18 +63,17 @@ export default function ValidadorFaltantesPage() {
       setRunning(true);
       setProgress(10);
 
-      // corpo mínimo: somente o que o backend precisa
-      const body = {
-        codi_emp: Number(empresa),
-        data_inicio: dataIni,
-        data_fim: dataFim,
+      const payload: ClassifySupplierRequest = {
+        empresa_id: Number(empresa),
+        periodo_inicio: dataIni,
+        periodo_fim: dataFim,
       };
 
-      const res = await exportReport(body); // POST /api/validador-faltantes/export
+      const res = await classifySuppliers(payload);
       setProgress(70);
 
       if (!res.ok) {
-        let msg = "Falha ao gerar relatório.";
+        let msg = "Falha ao classificar fornecedores.";
         try {
           const j = await res.json();
           msg = j?.error || msg;
@@ -81,11 +83,14 @@ export default function ValidadorFaltantesPage() {
         throw new Error(msg);
       }
 
+      // tenta extrair nome do arquivo do header (se vier)
       const dispo = res.headers.get("content-disposition") ?? "";
       const match = dispo.match(/filename="?([^"]+)"?/i);
       const filename =
-        match?.[1] || `validador_faltantes_${empresa}_${dataIni}_${dataFim}.xlsx`;
+        match?.[1] ||
+        `classificador_fornecedores_${empresa}_${dataIni}_${dataFim}.xlsx`;
 
+      // baixa o arquivo
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -97,11 +102,11 @@ export default function ValidadorFaltantesPage() {
       URL.revokeObjectURL(url);
 
       setProgress(100);
-      toast({ title: "Relatório gerado. Download iniciado." });
+      toast({ title: "Classificação concluída. Download iniciado." });
     } catch (err: any) {
       toast({
         variant: "destructive",
-        title: "Erro ao gerar relatório",
+        title: "Erro ao classificar fornecedores",
         description: err?.message ?? String(err),
       });
     } finally {
@@ -115,11 +120,11 @@ export default function ValidadorFaltantesPage() {
     <div className="space-y-8">
       <Card className="shadow-lg">
         <CardHeader>
-          <CardTitle>Validador de Notas Faltantes</CardTitle>
+          <CardTitle>Classificador de Fornecedores</CardTitle>
           <CardDescription>
             Informe o <strong>código da empresa</strong> e o{" "}
-            <strong>período</strong> (máx. 3 meses). O backend identifica o CNPJ e
-            analisa entradas e saídas automaticamente.
+            <strong>período</strong> (máx. 3 meses) para classificar e analisar
+            o perfil dos fornecedores.
           </CardDescription>
         </CardHeader>
 
@@ -155,7 +160,7 @@ export default function ValidadorFaltantesPage() {
           </div>
 
           <Button onClick={handleSubmit} disabled={running}>
-            {running ? "Gerando…" : "Gerar Relatório"}
+            {running ? "Classificando..." : "Classificar Fornecedores"}
           </Button>
 
           {progress > 0 && <Progress value={progress} className="h-2" />}

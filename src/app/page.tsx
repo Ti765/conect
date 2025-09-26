@@ -1,8 +1,8 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowRight, BarChart3, FileText, AlertTriangle } from "lucide-react";
-import Image from "next/image";
 import Link from "next/link";
+import FiscalFlowFFItalic from "@/components/icons/FiscalFlowFFItalic";
 
 export default function DashboardPage() {
   const indicators = [
@@ -25,24 +25,9 @@ export default function DashboardPage() {
             </p>
             {/* Botão removido: Analisar Divergências com IA */}
           </div>
-          <div>
-            {/* Imagem dinâmica para tema claro/escuro */}
-            <Image
-              src="/Logo-Glip-Sem%20Assinatura%20da%20Marca_Colorido.png"
-              alt="Logo Glip Colorido"
-              width={600}
-              height={400}
-              className="block dark:hidden"
-              priority
-            />
-            <Image
-              src="/3.%20Logo-Glip-Completo_Branco_Todo%20Branco.png"
-              alt="Logo Glip Branco"
-              width={600}
-              height={400}
-              className="hidden dark:block"
-              priority
-            />
+          <div className="flex justify-center">
+            {/* New SVG logo component (responsive via size prop) */}
+            <FiscalFlowFFItalic size={200} className="mx-auto" idSuffix="home-logo" />
           </div>
         </div>
       </section>

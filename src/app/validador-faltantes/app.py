@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, unquote
 
 import httpx
-import openpyxl
+import openpyxl  # mantido para compatibilidade do engine
 import pandas as pd
 import pyodbc
 from dotenv import load_dotenv
@@ -486,6 +486,26 @@ def _parse_cte(xml_bytes: bytes) -> Dict:
     d["MODELO_SIEG"] = 57
     return d
 
+def _parse_cancel_event(xml_bytes: bytes) -> Optional[str]:
+    """
+    Retorna a CHAVE do documento cancelado (tpEvento=110111) caso detecte um procEventoNFe/CTe.
+    """
+    try:
+        root = ET.fromstring(xml_bytes)
+        tp = None
+        ch = None
+        for el in root.iter():
+            name = _xml_localname(el.tag)
+            if name == "tpEvento":
+                tp = (el.text or "").strip()
+            elif name in ("chNFe", "chCTe"):
+                ch = _digits(el.text or "")
+        if tp == "110111" and ch and len(ch) >= 44:
+            return ch
+    except Exception:
+        pass
+    return None
+
 def _make_filters(cnpj: str, tipo: TipoDocumento, di: date, df: date, direcao: Direcao) -> List[Dict]:
     base = {
         "XmlType": 1 if tipo == TipoDocumento.NFE else 2,
@@ -493,10 +513,12 @@ def _make_filters(cnpj: str, tipo: TipoDocumento, di: date, df: date, direcao: D
         "Skip": 0,
         "DataEmissaoInicio": f"{di.isoformat()}T00:00:00",
         "DataEmissaoFim": f"{df.isoformat()}T23:59:59",
+        "Downloadevent": True,  # ligar eventos para identificar cancelamentos
     }
     if tipo == TipoDocumento.NFE:
         return [{**base, "CnpjDest": cnpj}] if direcao == Direcao.ENTRADA else [{**base, "CnpjEmit": cnpj}]
     else:
+        # CT-e: apenas tomados (entradas)
         return [{**base, "CnpjTom": cnpj}] if direcao == Direcao.ENTRADA else []
 
 async def _sieg_download_pages(filters: Dict) -> List[bytes]:
@@ -536,9 +558,14 @@ async def _sieg_download_pages(filters: Dict) -> List[bytes]:
                 await asyncio.sleep(SIEG_RATE_SLEEP)
                 continue
 
+            # Sem resultados (variações conhecidas)
             if resp.status_code == 400 and body in ("[]",""):
                 log.info("SIEG retornou 400 + [] (sem resultados) – fim.")
                 break
+            if resp.status_code == 404:
+                log.info("SIEG retornou 404 (nenhum XML localizado) – fim.")
+                break
+
             if resp.status_code in (401,403):
                 raise HTTPException(resp.status_code, f"Não Autenticado/Autorizado no SIEG: {body[:500]}")
             raise HTTPException(502, f"SIEG HTTP {resp.status_code}: {body[:500]}")
@@ -549,13 +576,23 @@ async def fetch_sieg_lote(cnpj: str, tipo: TipoDocumento, di: date, df: date, di
     if not filters_list:
         return pd.DataFrame(columns=["CHAVE"])
     rows: List[Dict] = []
+    canceladas: set[str] = set()
+
     for flt in filters_list:
         xmls = await _sieg_download_pages(flt)
         log.info("SIEG %s/%s: %s XML(s) brutos", tipo, direcao, len(xmls))
         for xb in xmls:
+            # 1) Tentar identificar evento de cancelamento
+            ch_cancel = _parse_cancel_event(xb)
+            if ch_cancel:
+                canceladas.add(ch_cancel)
+                continue
+
+            # 2) Documento “normal”
             try:
                 info = _parse_nfe(xb) if tipo == TipoDocumento.NFE else _parse_cte(xb)
-                if not info.get("CHAVE"): continue
+                if not info.get("CHAVE"): 
+                    continue
                 info["CHAVE"] = re.sub(r"\D", "", info["CHAVE"])
                 for k in ["CNPJ_EMIT_SIEG","CNPJ_DEST_SIEG","CNPJ_TOM_SIEG","CNPJ_REM_SIEG"]:
                     if k in info and info[k]:
@@ -572,6 +609,11 @@ async def fetch_sieg_lote(cnpj: str, tipo: TipoDocumento, di: date, df: date, di
 
     df = pd.DataFrame(rows)
     df = df[df["CHAVE"].str.len() >= 44].drop_duplicates(subset=["CHAVE"]).copy()
+
+    # Remover chaves canceladas que porventura tenham vindo como documento também
+    if canceladas:
+        df = df[~df["CHAVE"].isin(canceladas)].copy()
+
     df["DIRECAO"] = direcao
     return df
 
@@ -608,16 +650,64 @@ def cross_check(df_dom: pd.DataFrame, df_sieg: pd.DataFrame) -> Tuple[pd.DataFra
     return faltantes, diverg
 
 # ==============================================================================
-# Excel
+# Excel (melhorado)
 # ==============================================================================
 def build_excel_multi(sheets: Dict[str, pd.DataFrame], resumo: Dict) -> bytes:
+    from openpyxl.styles import Font, Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
+    from openpyxl.formatting.rule import FormulaRule
+
     bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+    with pd.ExcelWriter(bio, engine="openpyxl") as w:
         for name, df in sheets.items():
-            (df if not df.empty else pd.DataFrame(columns=["CHAVE"])).to_excel(
-                writer, index=False, sheet_name=name[:31]
-            )
-        pd.DataFrame([resumo]).to_excel(writer, index=False, sheet_name="Resumo")
+            df2 = df.copy()
+            if df2.empty:
+                df2 = pd.DataFrame(columns=["CHAVE"])
+            df2.to_excel(w, index=False, sheet_name=name[:31])
+            ws = w.sheets[name[:31]]
+
+            # congelar cabeçalho e filtros
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+
+            # cabeçalho
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.fill = PatternFill("solid", fgColor="F2F2F2")
+
+            # larguras aproximadas
+            for col_idx, col in enumerate(ws.iter_cols(min_row=1, max_row=1), start=1):
+                hdr = col[0].value or ""
+                width = max(12, min(50, len(str(hdr)) + 4))
+                ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+            # formatação por nome de coluna
+            header_map = {c.value: c.column for c in ws[1]}
+            for cname in ("DATA_EMISSAO_SIEG", "DATA_EMISSAO"):
+                if cname in header_map:
+                    for r in ws.iter_rows(min_row=2, min_col=header_map[cname], max_col=header_map[cname]):
+                        for c in r: c.number_format = "yyyy-mm-dd"
+            for cname in ("VALOR_TOTAL",):
+                if cname in header_map:
+                    for r in ws.iter_rows(min_row=2, min_col=header_map[cname], max_col=header_map[cname]):
+                        for c in r: c.number_format = "#,##0.00"
+
+            # destaque leve para linhas com STATUS_DOM_NORM presente
+            if "STATUS_DOM_NORM" in header_map:
+                colL = get_column_letter(header_map["STATUS_DOM_NORM"])
+                ws.conditional_formatting.add(
+                    f"{colL}2:{colL}{ws.max_row}",
+                    FormulaRule(formula=[f'LEN({colL}2)>0'], stopIfTrue=True,
+                                fill=PatternFill("solid", fgColor="FFF2CC"))
+                )
+
+        # Resumo
+        pd.DataFrame([resumo]).to_excel(w, index=False, sheet_name="Resumo")
+        ws = w.sheets["Resumo"]
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+
     return bio.getvalue()
 
 # ==============================================================================
@@ -645,6 +735,17 @@ async def generate_all(codi_emp: int, di: date, df: date) -> Tuple[bytes, str]:
     # NFe - Saídas
     df_sieg_out_nfe = await fetch_sieg_lote(cnpj, TipoDocumento.NFE, di, df, Direcao.SAIDA)
     df_dom_out_nfe  = query_dom_saidas(codi_emp, TipoDocumento.NFE, di, df, sai_map)
+
+    # >>> Correção: remover “entrada própria” do conjunto SIEG-SAÍDA
+    try:
+        dom_in_keys = set(df_dom_in_nfe["CHAVE"].dropna().astype(str))
+        if not df_sieg_out_nfe.empty and dom_in_keys:
+            before = len(df_sieg_out_nfe)
+            df_sieg_out_nfe = df_sieg_out_nfe[~df_sieg_out_nfe["CHAVE"].isin(dom_in_keys)].copy()
+            log.info("Entrada própria filtrada no SIEG-SAÍDA: %s removidas", before - len(df_sieg_out_nfe))
+    except Exception as e:
+        log.warning("Falha ao filtrar entrada própria: %s", e)
+
     falt_out_nfe, div_out_nfe = cross_check(df_dom_out_nfe, df_sieg_out_nfe)
     sheets["Faltantes_Saida_NFE"]    = falt_out_nfe
     sheets["Divergencias_Saida_NFE"] = div_out_nfe

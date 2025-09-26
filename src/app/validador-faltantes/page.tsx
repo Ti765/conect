@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -21,6 +21,7 @@ export default function ValidadorFaltantesPage() {
   const [dataFim, setDataFim] = useState<string>("");
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
+  const abortRef = useRef<AbortController | null>(null);
   const { toast } = useToast();
 
   // --- helpers --------------------------------------------------------------
@@ -32,12 +33,25 @@ export default function ValidadorFaltantesPage() {
     return Math.floor(diff / (1000 * 60 * 60 * 24));
   }
 
+  function resetProgressSoon() {
+    setTimeout(() => setProgress(0), 1200);
+  }
+
   async function handleSubmit() {
+    if (running) return;
+
     // validações simples
     if (!empresa || !dataIni || !dataFim) {
       toast({
         variant: "destructive",
         title: "Preencha código da empresa e o período.",
+      });
+      return;
+    }
+    if (Number.isNaN(Number(empresa))) {
+      toast({
+        variant: "destructive",
+        title: "Código da empresa deve ser numérico.",
       });
       return;
     }
@@ -58,35 +72,48 @@ export default function ValidadorFaltantesPage() {
 
     try {
       setRunning(true);
-      setProgress(10);
+      setProgress(8);
 
-      // corpo mínimo: somente o que o backend precisa
+      // controlador para cancelar requisição (se o usuário clicar Cancelar)
+      const ctl = new AbortController();
+      abortRef.current = ctl;
+
       const body = {
         codi_emp: Number(empresa),
         data_inicio: dataIni,
         data_fim: dataFim,
-      };
+      } as const;
 
-      const res = await exportReport(body); // POST /api/validador-faltantes/export
-      setProgress(70);
+      setProgress(18);
+
+      // POST /validador-faltantes/export (retorna XLSX binário)
+      const res = await exportReport(body, ctl.signal);
+      setProgress(65);
 
       if (!res.ok) {
+        // tenta ler JSON de erro da API
         let msg = "Falha ao gerar relatório.";
         try {
           const j = await res.json();
           msg = j?.error || msg;
         } catch {
-          // ignore
+          // se não for JSON, deixa mensagem padrão
         }
         throw new Error(msg);
       }
 
+      // nome do arquivo via Content-Disposition
       const dispo = res.headers.get("content-disposition") ?? "";
       const match = dispo.match(/filename="?([^"]+)"?/i);
       const filename =
-        match?.[1] || `validador_faltantes_${empresa}_${dataIni}_${dataFim}.xlsx`;
+        match?.[1] ||
+        `validador_faltantes_${empresa}_${dataIni}_${dataFim}.xlsx`;
 
+      // baixa o binário
       const blob = await res.blob();
+      setProgress(85);
+
+      // dispara o download
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -99,66 +126,104 @@ export default function ValidadorFaltantesPage() {
       setProgress(100);
       toast({ title: "Relatório gerado. Download iniciado." });
     } catch (err: any) {
-      toast({
-        variant: "destructive",
-        title: "Erro ao gerar relatório",
-        description: err?.message ?? String(err),
-      });
+      if (err?.name === "AbortError") {
+        toast({ title: "Operação cancelada." });
+      } else {
+        toast({
+          variant: "destructive",
+          title: "Erro ao gerar relatório",
+          description: err?.message ?? String(err),
+        });
+      }
     } finally {
       setRunning(false);
-      setTimeout(() => setProgress(0), 1200);
+      abortRef.current = null;
+      resetProgressSoon();
+    }
+  }
+
+  function handleCancel() {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+      setRunning(false);
+      setProgress(0);
     }
   }
 
   // --- render ---------------------------------------------------------------
   return (
-    <div className="space-y-8">
+    <div className="max-w-4xl mx-auto space-y-8">
       <Card className="shadow-lg">
         <CardHeader>
           <CardTitle>Validador de Notas Faltantes</CardTitle>
           <CardDescription>
             Informe o <strong>código da empresa</strong> e o{" "}
             <strong>período</strong> (máx. 3 meses). O backend identifica o CNPJ e
-            analisa entradas e saídas automaticamente.
+            analisa entradas/saídas (NFe) e CT-e (tomados) por data de{" "}
+            <em>emissão</em>.
           </CardDescription>
         </CardHeader>
 
         <CardContent className="space-y-6">
           <div className="grid md:grid-cols-3 gap-4">
             <div>
-              <Label>Código da Empresa</Label>
+              <Label htmlFor="empresa">Código da Empresa</Label>
               <Input
+                id="empresa"
                 inputMode="numeric"
                 placeholder="Ex.: 586"
                 value={empresa}
                 onChange={(e) => setEmpresa(e.target.value)}
+                disabled={running}
               />
             </div>
 
             <div>
-              <Label>Data Inicial</Label>
+              <Label htmlFor="dataIni">Data Inicial</Label>
               <Input
+                id="dataIni"
                 type="date"
                 value={dataIni}
                 onChange={(e) => setDataIni(e.target.value)}
+                disabled={running}
               />
             </div>
 
             <div>
-              <Label>Data Final</Label>
+              <Label htmlFor="dataFim">Data Final</Label>
               <Input
+                id="dataFim"
                 type="date"
                 value={dataFim}
                 onChange={(e) => setDataFim(e.target.value)}
+                disabled={running}
               />
             </div>
           </div>
 
-          <Button onClick={handleSubmit} disabled={running}>
-            {running ? "Gerando…" : "Gerar Relatório"}
-          </Button>
+          <div className="flex items-center gap-3">
+            <Button onClick={handleSubmit} disabled={running}>
+              {running ? "Gerando…" : "Gerar Relatório"}
+            </Button>
+            {running && (
+              <Button variant="secondary" onClick={handleCancel}>
+                Cancelar
+              </Button>
+            )}
+          </div>
 
-          {progress > 0 && <Progress value={progress} className="h-2" />}
+          {progress > 0 && (
+            <div className="space-y-2">
+              <Progress value={progress} className="h-2" />
+              <p className="text-xs text-muted-foreground">
+                {progress < 20 && "Preparando…"}
+                {progress >= 20 && progress < 70 && "Processando…"}
+                {progress >= 70 && progress < 100 && "Finalizando relatório…"}
+                {progress === 100 && "Concluído!"}
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
